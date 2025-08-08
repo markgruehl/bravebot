@@ -163,7 +163,6 @@ async def channelstats_command(
     # Build name lookups with best-effort resolution (cache -> guild fetch -> global fetch)
     user_ids: set[int] = set(stats.total_time_per_user.keys())
     user_ids.update(stats.session_count_per_user.keys())
-    user_ids.update(stats.weekday_streak_per_user.keys())
     for a, b in stats.pair_cotime_seconds.keys():
         user_ids.add(a)
         user_ids.add(b)
@@ -240,18 +239,6 @@ async def channelstats_command(
         )
     else:
         embed.add_field(name="Top by total time", value="No sessions", inline=False)
-
-    # Streaks
-    if stats.weekday_streak_per_user:
-        streaks = sorted(
-            stats.weekday_streak_per_user.items(), key=lambda kv: kv[1], reverse=True
-        )[:10]
-        lines = [f"• {name_for(uid)} — {streak} weekdays" for uid, streak in streaks]
-        embed.add_field(
-            name="🔥 Weekday streaks — consecutive weekdays present",
-            value="\n".join(lines),
-            inline=False,
-        )
 
     # Average session length
     if stats.average_session_seconds_per_user:
