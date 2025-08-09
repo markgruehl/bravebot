@@ -1,59 +1,59 @@
+"""Main entry point for BraveBot."""
+
+import logging
 import discord
-import os
-import requests
 
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK")
+from bravebot.bot import BraveBot
+from bravebot.commands import setup_commands
+from bravebot.config import config
 
-class BraveBot(discord.Client):
-    async def on_ready(self):
-        print('Logged on as', self.user)
+# Set up logging for Docker-friendly output
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)-8s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
-    async def on_message(self, message):
-        # don't respond to ourselves
-        if message.author == self.user:
-            return
+# Configure Discord library logging without extra handlers (avoid duplicates)
+discord_logger = logging.getLogger("discord")
+discord_logger.setLevel(logging.INFO)
+# Ensure no handlers on the discord logger; let it propagate to root
+for h in list(discord_logger.handlers):
+    discord_logger.removeHandler(h)
+discord_logger.propagate = True
+logging.getLogger("discord.http").setLevel(logging.WARNING)
 
-        if message.content == 'ping':
-            print(f"{message.author} pong", flush=True)
-            await message.channel.send('pong')
+# Create logger for this module
+logger = logging.getLogger(__name__)
 
-    async def on_voice_state_update(self, member, before, after):
-        guild = member.guild
 
-        # do not send if there is no system channel in guild or if the member state change belongs to a bot user
-        if guild.system_channel is None and member.bot:
-            return
+def create_bot() -> BraveBot:
+    """Create and configure the bot instance."""
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.voice_states = True
 
-        # do not send if voice state change occurs in same channel. Eg. mute/unmute
-        if before.channel is after.channel:
-            return
+    bot = BraveBot(command_prefix="!", intents=intents)
+    setup_commands(bot)
 
-        # disconnected
-        if after.channel is None:
-            to_send_mentions = f'{member.mention} has disconnected from {before.channel.mention}'
-            to_send_names = f'{member.name} has disconnected from {before.channel.name}'
-        # connected
-        elif member in after.channel.members:
-            # member is joing for first time
-            if before.channel is None:
-                to_send_mentions = f'{member.mention} has connected to {after.channel.mention}'
-                to_send_names = f'{member.name} has connected to {after.channel.name}'
-            # member is changing channels
-            else:
-                to_send_mentions = f'{member.mention} has changed channels from {before.channel.mention} to {after.channel.mention}'
-                to_send_names = f'{member.name} has changed channels from {before.channel.name} to {after.channel.name}'
+    return bot
 
-        # if the slack webhook exists, send a message to it
-        if SLACK_WEBHOOK is not None or SLACK_WEBHOOK != "":
-            requests.post(SLACK_WEBHOOK, json={"text": to_send_names})
 
-        # Send message to Discord guild system channel
-        await guild.system_channel.send(to_send_mentions)
+def main():
+    """Main function to start the bot."""
+    logger.info("Starting BraveBot...")
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True
+    if not config.validate():
+        logger.error("Invalid config!")
+        exit(1)
 
-client = BraveBot(intents=intents)
-client.run(DISCORD_BOT_TOKEN)
+    try:
+        bot = create_bot()
+        bot.run(config.discord_bot_token)
+    except Exception as e:
+        logger.critical(f"Failed to start bot: {e}")
+        exit(1)
+
+
+if __name__ == "__main__":
+    main()
