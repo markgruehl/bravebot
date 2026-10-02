@@ -31,4 +31,14 @@ We're migrating to Cloudflare Workers in TypeScript. Architectural constraints t
 - `VOICE_STATE_UPDATE` only contains the *new* state, so the DO must track each member's current channel itself, seeded from `GUILD_CREATE.voice_states`.
 - Outbound notifications go through Discord REST (`POST /channels/{id}/messages`) and the Slack webhook via `fetch`.
 - Secrets go in `wrangler secret put`, never in `wrangler.jsonc` or the repo.
+
+### Cost guardrails (Workers Paid plan)
+
+The Gateway DO can't hibernate (outbound WebSockets never do), so it bills duration 24/7: about 324k–335k GB-s/month against 400k included. That leaves room for **one** always-on object, so:
+
+- **Exactly one Gateway DO.** Always address it with `getByName("gateway")`, never `newUniqueId()`. Each extra always-connected instance costs another ~330k GB-s/month.
+- **Reconnects use exponential backoff with a cap.** Track identifies, because Discord allows 1000 per day and resets the bot token if you exceed that. Prefer RESUME over IDENTIFY.
+- **Don't write to storage on every Gateway message.** Persist `seq` in batches (on the alarm tick or every N events) and persist voice state only when it changes.
+- **Keep the alarm watchdog at about 60s or slower.** A cron trigger is only a bootstrap, so run it at most every 5 minutes.
+- **The public interactions endpoint verifies the Ed25519 signature first** and rejects bad requests before doing any other work.
 - Use `pnpm`.
