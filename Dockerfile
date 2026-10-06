@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # bravebot: multi-stage, multi-arch (linux/amd64 + linux/arm64) image.
-# No native addons need compiling: @snazzah/davey ships prebuilt linux-{x64,arm64}-gnu
-# binaries (glibc base image required) and opusscript is WASM/asm.js.
+# @snazzah/davey ships prebuilt linux-{x64,arm64}-gnu binaries (glibc base image required).
+# @discordjs/opus (native libopus) has no prebuild for trixie's glibc, so prod-deps compiles it
+# from its bundled libopus source; the toolchain never reaches the runtime image.
 
 # Base image is written literally on each FROM (not via ARG) so Dependabot can update it.
 # It is pinned to a full Node version AND the multi-arch index digest: Dependabot then opens
@@ -16,7 +17,8 @@
 FROM --platform=$BUILDPLATFORM node:22.23.3-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --no-audit --no-fund
+# Only compiles TypeScript, so skip install scripts (no native @discordjs/opus build here).
+RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
@@ -26,9 +28,17 @@ RUN npm run build
 # optional packages such as @snazzah/davey-linux-arm64-gnu are selected here).
 # ---------------------------------------------------------------------------
 FROM node:22.23.3-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS prod-deps
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund \
+# --build-from-source: never download a prebuilt binary.
+# CFLAGS: @discordjs/opus's arm64 config disables NEON (no OPUS_ARM_MAY_HAVE_NEON_INTR/RTCD) yet
+# still compiles celt_neon_intr.c, whose unreachable float path calls an undeclared function.
+# GCC 14 makes that an error; downgrading it to a warning matches how older compilers built it.
+RUN CFLAGS="-Wno-error=implicit-function-declaration" \
+    npm ci --omit=dev --no-audit --no-fund --build-from-source \
  && npm cache clean --force
 
 # ---------------------------------------------------------------------------
