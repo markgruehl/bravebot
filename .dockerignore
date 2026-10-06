@@ -1,5 +1,17 @@
-__pycache__
-.ruff_cache
+# Keep the build context small and free of secrets.
+.git
+.github
+.claude
+node_modules
+dist
+coverage
+*.log
 .env
 .envrc
+.DS_Store
+.vscode
+.idea
+docker-compose.yaml
 docker-compose.yml
+README.md
+**/*.test.ts

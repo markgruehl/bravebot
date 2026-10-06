@@ -1,0 +1,49 @@
+# Commit prefixes drive release-please:
+#   fix(deps)   -> runtime dependencies (merging cuts a patch release)
+#   chore(deps) -> dev tooling and CI (no release)
+version: 2
+updates:
+  # npm: production deps -> fix(deps); devDependencies -> chore(deps)
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix(deps)
+      prefix-development: chore(deps)
+    ignore:
+      # Stay on the Node 22 LTS type definitions (matches the runtime image).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  # yt-dlp (pinned in docker/requirements.txt, installed into the image)
+  - package-ecosystem: pip
+    directory: /docker
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix(deps)
+
+  # Docker base image
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix(deps)
+    ignore:
+      # Node major upgrades are deliberate (stay on Node 22 LTS).
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)

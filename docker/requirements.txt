@@ -1,0 +1,5 @@
+# Runtime Python tooling installed into the Docker image (see Dockerfile).
+# Pinned so Dependabot (pip ecosystem, directory /docker) can bump it; merges cut a patch release.
+# The "default" extra pulls yt-dlp-ejs (YouTube JS challenge solver, pinned by yt-dlp itself)
+# plus the recommended optional dependencies (brotli, certifi, mutagen, pycryptodomex, websockets...).
+yt-dlp[default]==2026.8.19
