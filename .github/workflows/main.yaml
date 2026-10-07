@@ -1,0 +1,336 @@
+name: Main
+
+# Trunk-based flow; runs only on pushes to main, never on pull requests.
+#
+#   check            typecheck, lint, test, build
+#   release-please   (if checks pass) maintains the release PR; merging it tags vX.Y.Z
+#   plan             decides which images to build (see below)
+#   docker-build     per image x architecture, on native runners: build, smoke-test, push by digest
+#   docker-manifest  per image: combine both architectures under its tags
+#
+# Every push builds `edge` from the pushed commit. When a release is cut on the same commit,
+# that one image also gets X.Y.Z, X.Y, X and latest. If release-please tags an older commit
+# (the release PR was merged while main was failing, and a later push released it), that tag
+# is built separately, re-running the checks on it first, and `edge` is built from the push.
+#
+# Recovery: use "Re-run failed jobs" (digest artifacts are kept 7 days). Moving tags never go
+# backwards: a re-run only moves `edge` if its commit is still main's head, and `latest`/X/X.Y
+# only if its release is still the newest; X.Y.Z is always pushed. "Re-run all jobs" re-runs
+# release-please, which no longer reports the release, so only `edge` is rebuilt; to replace a
+# release whose image never published, cut a new release.
+#
+# Pins Renovate keeps up to date via the `# renovate:` comments: NODE_VERSION (kept in sync
+# with the Dockerfile's node image), BUILDX_VERSION, BUILDKIT_IMAGE (tag + index digest).
+# Actions are pinned by commit SHA and runners by version label.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: main-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # renovate: datasource=docker depName=node versioning=docker
+  NODE_VERSION: 22.23.3
+  # renovate: datasource=github-releases depName=docker/buildx
+  BUILDX_VERSION: v0.37.2
+  # renovate: datasource=docker depName=moby/buildkit
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+jobs:
+  check:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      # No install scripts: the checks don't need the native @discordjs/opus build.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  release-please:
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      # Requires the repo setting "Allow GitHub Actions to create and approve pull requests".
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  plan:
+    needs: release-please
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      builds: ${{ steps.plan.outputs.builds }}
+    steps:
+      - name: Plan image builds
+        id: plan
+        env:
+          RELEASE_CREATED: ${{ needs.release-please.outputs.release_created }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Each build: id (artifact names), ref (commit to build), tag (release tag or ""),
+          # edge (also tag `edge`), verify (re-run the checks on ref before building).
+          build() { jq -nc --arg id "$1" --arg ref "$2" --arg tag "$3" --argjson edge "$4" --argjson verify "$5" \
+            '{id: $id, ref: $ref, tag: $tag, edge: $edge, verify: $verify}'; }
+          if [ "$RELEASE_CREATED" = "true" ] && [ "$RELEASE_SHA" = "$HEAD_SHA" ]; then
+            builds="[$(build main "$HEAD_SHA" "$TAG_NAME" true false)]"
+          elif [ "$RELEASE_CREATED" = "true" ]; then
+            builds="[$(build release "$TAG_NAME" "$TAG_NAME" false true),$(build main "$HEAD_SHA" "" true false)]"
+          else
+            builds="[$(build main "$HEAD_SHA" "" true false)]"
+          fi
+          echo "$builds" | jq .
+          echo "builds=$builds" >> "$GITHUB_OUTPUT"
+
+  docker-build:
+    name: Docker build (${{ matrix.build.id }}, ${{ matrix.arch.platform }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.plan.outputs.builds) }}
+        arch:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.arch.runner }}
+    permissions:
+      contents: read
+    env:
+      IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/bravebot
+      PLATFORM: ${{ matrix.arch.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ matrix.build.ref }}
+          persist-credentials: false
+
+      # Only for a release tag on an older commit, which this run's checks didn't cover.
+      - name: Set up Node.js (verify)
+        if: ${{ matrix.build.verify }}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Verify release commit
+        if: ${{ matrix.build.verify }}
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Platform slug
+        run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+
+      # Same tag rules as docker-manifest, so the OCI version label is X.Y.Z or edge.
+      # context: git, so the revision/created labels come from the checked-out commit (the
+      # release tag's commit when it differs from the pushed one).
+      - name: Docker metadata (labels)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          context: git
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ matrix.build.tag }},enable=${{ matrix.build.tag != '' }}
+            type=raw,value=edge,enable=${{ matrix.build.edge }}
+
+      - name: Build for smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.arch.platform }}
+          load: true
+          tags: bravebot:smoke
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh bravebot:smoke -c 'yt-dlp --version && ffmpeg -hide_banner -version | head -n 1'
+          docker run --rm bravebot:smoke node -e '
+            const report = require("@discordjs/voice").generateDependencyReport();
+            console.log(report);
+            if (/@discordjs\/opus: not found|@snazzah\/davey: not found/.test(report)) process.exit(1);
+            const { OpusEncoder } = require("@discordjs/opus");
+            const enc = new OpusEncoder(48000, 2);
+            if (enc.decode(enc.encode(Buffer.alloc(3840))).length !== 3840) process.exit(1);
+            console.log("opus encode/decode ok");'
+          # Without a token the bot must load fully and exit 1 with its config error.
+          status=0
+          out=$(docker run --rm bravebot:smoke 2>&1) || status=$?
+          echo "$out"
+          test "$status" -eq 1
+          grep -q '\[config\] DISCORD_BOT_TOKEN is required' <<< "$out"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.arch.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.build.id }}-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 7
+
+  docker-manifest:
+    name: Docker manifest (${{ matrix.build.id }})
+    needs: [plan, docker-build]
+    # Run per image even if the other image's build failed; a missing digest fails this job.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.plan.outputs.builds) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/bravebot
+    steps:
+      # Keeps a late re-run from moving tags backwards past a newer run's images.
+      - name: Check moving tags are still current
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_REF: ${{ matrix.build.ref }}
+          BUILD_EDGE: ${{ matrix.build.edge }}
+          BUILD_TAG: ${{ matrix.build.tag }}
+        run: |
+          set -euo pipefail
+          edge=false
+          if [ "$BUILD_EDGE" = "true" ] && [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$BUILD_REF" ]; then
+            edge=true
+          fi
+          latest=false
+          if [ -n "$BUILD_TAG" ] && [ "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$BUILD_TAG" ]; then
+            latest=true
+          fi
+          echo "edge=$edge latest=$latest"
+          { echo "edge=$edge"; echo "latest=$latest"; } >> "$GITHUB_OUTPUT"
+
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.build.id }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Docker metadata (tags)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ matrix.build.tag }},enable=${{ matrix.build.tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ matrix.build.tag }},enable=${{ steps.current.outputs.latest }}
+            type=semver,pattern={{major}},value=${{ matrix.build.tag }},enable=${{ steps.current.outputs.latest }}
+            type=raw,value=latest,enable=${{ steps.current.outputs.latest }}
+            type=raw,value=edge,enable=${{ steps.current.outputs.edge }}
+          flavor: |
+            latest=false
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          mapfile -t digests < <(find . -type f -printf '%f\n')
+          test "${#digests[@]}" -eq 2
+          mapfile -t tag_args < <(jq -r '.tags[] | "-t", .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "Newer images already published; nothing to tag."
+            exit 0
+          fi
+          refs=()
+          for digest in "${digests[@]}"; do refs+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+
+      - name: Inspect
+        if: ${{ steps.meta.outputs.version != '' }}
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"

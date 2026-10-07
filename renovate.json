@@ -1,0 +1,125 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Every dependency is pinned exactly; Renovate bumps the pins. Commit types drive release-please: fix(deps) = runtime (lands in the next release as a patch), chore(deps) = tooling/CI (no release).",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "rangeStrategy": "pin",
+  "semanticCommits": "enabled",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "description": "Refreshes transitive deps in package-lock.json and docker/requirements.txt; runtime-affecting, so fix",
+    "semanticCommitType": "fix",
+    "semanticCommitScope": "deps"
+  },
+  "pip-compile": {
+    "managerFilePatterns": [
+      "/(^|/)docker/requirements\\.txt$/"
+    ]
+  },
+  "pip_requirements": {
+    "enabled": false
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Version pins in the workflow env annotated with `# renovate:` comments",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/main\\.yaml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\\s+[A-Z_]+: (?<currentValue>[^\\s@:]+)\\s",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+[A-Z_]+: \\S+?:(?<currentValue>[^\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Runner labels in the docker-build matrix (runs-on uses ${{ matrix.arch.runner }}, which the github-actions manager can't see)",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/main\\.yaml$/"
+      ],
+      "matchStrings": [
+        "runner: ubuntu-(?<currentValue>\\d+\\.\\d+)(-arm)?\\s"
+      ],
+      "datasourceTemplate": "github-runners",
+      "depNameTemplate": "ubuntu"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Runtime dependencies (including the tar override, which ships in the image): land in the next release as a patch",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepTypes": [
+        "dependencies",
+        "overrides"
+      ],
+      "semanticCommitType": "fix",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Runtime: Docker base image and the yt-dlp lockfile",
+      "matchManagers": [
+        "dockerfile",
+        "pip-compile"
+      ],
+      "semanticCommitType": "fix",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Dev tooling, GitHub Actions and CI tool pins: no release",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "matchManagers": [
+        "github-actions",
+        "custom.regex"
+      ],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Keep the image's Node and the CI NODE_VERSION in one PR so they stay in sync (runtime, so fix)",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "node"
+      ],
+      "groupName": "node",
+      "semanticCommitType": "fix",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Stay on Node 22 LTS; Node majors are deliberate, manual upgrades. A regex, because docker versioning cannot parse \"<23\" and would filter out every 22.x-trixie-slim tag",
+      "matchPackageNames": [
+        "node",
+        "@types/node"
+      ],
+      "allowedVersions": "/^22\\./"
+    },
+    {
+      "description": "Move every runner label (direct runs-on and the docker-build matrix) in one PR",
+      "matchDatasources": [
+        "github-runners"
+      ],
+      "groupName": "GitHub runners"
+    },
+    {
+      "description": "engines.node is a compatibility range, not a dependency to pin",
+      "matchDepTypes": [
+        "engines"
+      ],
+      "enabled": false
+    }
+  ]
+}

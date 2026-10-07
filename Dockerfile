@@ -1,14 +1,15 @@
-# syntax=docker/dockerfile:1
-
 # bravebot: multi-stage, multi-arch (linux/amd64 + linux/arm64) image.
 # @snazzah/davey ships prebuilt linux-{x64,arm64}-gnu binaries (glibc base image required).
 # @discordjs/opus (native libopus) has no prebuild for trixie's glibc, so prod-deps compiles it
 # from its bundled libopus source; the toolchain never reaches the runtime image.
 
-# Base image is written literally on each FROM (not via ARG) so Dependabot can update it.
-# It is pinned to a full Node version AND the multi-arch index digest: Dependabot then opens
+# No `# syntax=` directive: the frontend built into the pinned BuildKit is used, so no
+# floating frontend image is pulled.
+
+# Base image is written literally on each FROM (not via ARG) so Renovate can update it.
+# It is pinned to a full Node version AND the multi-arch index digest: Renovate then opens
 # fix(deps) PRs for Node 22 minor/patch releases and for Debian security rebuilds of the same
-# tag (its semver-major ignore keeps us on Node 22 LTS). Keep all three FROM lines identical.
+# tag (its allowedVersions rule keeps us on Node 22 LTS). Keep all three FROM lines identical.
 
 # ---------------------------------------------------------------------------
 # build: compile TypeScript. Output is platform-independent JS, so run it on the
@@ -37,7 +38,9 @@ COPY package.json package-lock.json ./
 # CFLAGS: @discordjs/opus's arm64 config disables NEON (no OPUS_ARM_MAY_HAVE_NEON_INTR/RTCD) yet
 # still compiles celt_neon_intr.c, whose unreachable float path calls an undeclared function.
 # GCC 14 makes that an error; downgrading it to a warning matches how older compilers built it.
-RUN CFLAGS="-Wno-error=implicit-function-declaration" \
+# npm_config_nodedir: compile against the headers shipped in this (digest-pinned) image instead
+# of downloading them from nodejs.org.
+RUN npm_config_nodedir=/usr/local CFLAGS="-Wno-error=implicit-function-declaration" \
     npm ci --omit=dev --no-audit --no-fund --build-from-source \
  && npm cache clean --force
 
@@ -52,10 +55,12 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # yt-dlp lives in its own venv (Debian's system Python is externally managed, PEP 668).
+# docker/requirements.txt is a hash-pinned lockfile (pip-compile) covering every transitive
+# dependency; --require-hashes --no-deps installs exactly it, from wheels only.
 COPY docker/requirements.txt /opt/yt-dlp/requirements.txt
 RUN python3 -m venv /opt/yt-dlp/venv \
- && /opt/yt-dlp/venv/bin/pip install --no-cache-dir --upgrade pip \
- && /opt/yt-dlp/venv/bin/pip install --no-cache-dir -r /opt/yt-dlp/requirements.txt \
+ && /opt/yt-dlp/venv/bin/pip install --no-cache-dir --require-hashes --no-deps --only-binary=:all: \
+      -r /opt/yt-dlp/requirements.txt \
  && ln -s /opt/yt-dlp/venv/bin/yt-dlp /usr/local/bin/yt-dlp \
  && yt-dlp --version \
  && ffmpeg -hide_banner -version | head -n 1

@@ -127,7 +127,7 @@ docker run -d --name bravebot --restart unless-stopped \
   marksansome11/bravebot:latest
 ```
 
-Images are multi-arch (`linux/amd64`, `linux/arm64`), run as an unprivileged user and use `tini` as init (no `--init` flag needed). They include Node.js 22, ffmpeg and a pinned yt-dlp (with its YouTube challenge solver, using Node.js as the JavaScript runtime). The tags are `X.Y.Z`, `X.Y`, `X` and `latest`.
+Images are multi-arch (`linux/amd64`, `linux/arm64`), run as an unprivileged user and use `tini` as init (no `--init` flag needed). They include Node.js 22, ffmpeg and a pinned yt-dlp (with its YouTube challenge solver, using Node.js as the JavaScript runtime). Tags: `X.Y.Z`, `X.Y`, `X` and `latest` for releases (`latest` is always the newest release), and `edge` for the newest build of `main` (for testing, not a release).
 
 ### Docker Compose (local)
 
@@ -138,7 +138,7 @@ docker compose up --build
 
 ## Local development
 
-Requirements: Node.js 22 (>= 22.12), npm, plus **ffmpeg** and **yt-dlp** on your `PATH`. Install yt-dlp with `pip install -r docker/requirements.txt` to use the same version as the image. YouTube extraction also needs a JavaScript runtime, which you can enable for Node.js with `--js-runtimes node` in your yt-dlp config (see [`docker/yt-dlp.conf`](docker/yt-dlp.conf)).
+Requirements: Node.js 22 (>= 22.12), npm, plus **ffmpeg** and **yt-dlp** on your `PATH`. Install yt-dlp with `pip install --require-hashes -r docker/requirements.txt` to use the same versions as the image. YouTube extraction also needs a JavaScript runtime, which you can enable for Node.js with `--js-runtimes node` in your yt-dlp config (see [`docker/yt-dlp.conf`](docker/yt-dlp.conf)).
 
 ```sh
 npm ci
@@ -160,32 +160,42 @@ Source layout:
 | `src/library/` | Library message format, name validation and the Discord-backed store |
 | `src/guild/` | Channel discovery and creation, and the admin log |
 | `src/interactions/` | Slash commands, the button panel, the context menu, autocomplete and permission checks |
-| `src/legacy/` | Voice notices, the Slack mirror and ping |
+| `src/voice-activity/` | Voice join/leave/move notices and the Slack mirror |
+| `src/ping/` | The ping → pong reply |
 
 Unit tests are `*.test.ts` files that sit next to the code they test, run with [vitest](https://vitest.dev).
 
-## Releases
+## Releases and images
 
-Releases are automated with [release-please](https://github.com/googleapis/release-please) and [Conventional Commits](https://www.conventionalcommits.org/):
+Development is trunk-based: changes merge to `main` over time. Everything runs in one workflow, [`.github/workflows/main.yaml`](.github/workflows/main.yaml), on pushes to `main`. **Nothing runs on pull requests.**
 
-1. Merge PRs to `main` with conventional commit messages: `feat:` → minor, `fix:` → patch, `feat!:` or `BREAKING CHANGE:` → major.
-2. release-please opens or updates a **release PR** that bumps `package.json` and `CHANGELOG.md`.
-3. Merging the release PR tags `vX.Y.Z`, creates the GitHub release and, **in the same workflow**, builds and pushes the multi-arch image to Docker Hub.
+1. Every push to `main` runs typecheck, lint, tests and a TypeScript build. Install scripts are disabled, so no dependency code runs at install time.
+2. If the checks pass, [release-please](https://github.com/googleapis/release-please) opens or updates a **release PR** from the [Conventional Commits](https://www.conventionalcommits.org/) on `main` (`feat:` → minor, `fix:` → patch, `feat!:` or `BREAKING CHANGE:` → major). It bumps `package.json` and `CHANGELOG.md`.
+3. Every passing push builds the image natively on an amd64 and an arm64 runner, smoke-tests it on each, and pushes it to Docker Hub as **`edge`**: the latest `main`, for testing, not a release.
+4. Merging the release PR tags `vX.Y.Z` and creates the GitHub release. That push's image is also tagged `X.Y.Z`, `X.Y`, `X` and **`latest`**, so `latest` always means the latest release.
 
-The workflow uses the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+If checks fail, nothing is built, tagged or released. If release-please ever tags an older commit (the release PR was merged while `main` was failing, then released by a later passing push), that tag is checked again and built separately, and `edge` comes from the newer push.
 
-**Prerequisite:** release-please opens its release PR with the workflow's `GITHUB_TOKEN`, so the repository must allow that. Enable **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"**. Without it the release job fails with "GitHub Actions is not permitted to create or approve pull requests" and no release or image is ever published. The CLI equivalent is:
+If a release image fails to publish, use **Re-run failed jobs** (build artifacts are kept 7 days). Re-runs never move tags backwards: `edge` only moves if that commit is still `main`'s head, and `latest`, `X` and `X.Y` only if that release is still the newest (`X.Y.Z` is always pushed). "Re-run all jobs" only rebuilds `edge`. To replace a release whose image never published, cut a new release.
 
-```sh
-gh api -X PUT repos/<owner>/bravebot/actions/permissions/workflow \
-  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
-```
+The workflow uses the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The arm64 jobs use GitHub's `ubuntu-24.04-arm` runner, which is free only for public repositories.
 
-(Alternative: pass a GitHub App token or PAT to `release-please-action` via `token:`. This also lets CI run on the release PR, since PRs opened by `GITHUB_TOKEN` do not trigger other workflows. It needs an extra secret.)
+**Prerequisite:** release-please opens its release PR with the workflow's `GITHUB_TOKEN`, so the repository must allow that. Enable **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"**.
 
-Dependabot keeps dependencies current:
+### Dependency pinning and updates
 
-- Runtime dependencies use the `fix(deps)` prefix, so merging one cuts a patch release. These are the npm production packages, yt-dlp in `docker/requirements.txt` and the Docker base image.
-- Dev tooling and GitHub Actions use the `chore(deps)` prefix and don't trigger a release.
+Every dependency is pinned to an exact version, and [Renovate](https://docs.renovatebot.com/) ([`renovate.json`](renovate.json)) keeps the pins current. Install the [Renovate GitHub App](https://github.com/apps/renovate) on the repository to enable it.
 
-CI (`.github/workflows/ci.yaml`) runs typecheck, lint, tests, a TypeScript build and a multi-arch Docker build (no push) on every PR and on every push to `main`.
+- **npm:** exact versions in `package.json` (`.npmrc` sets `save-exact`), with `package-lock.json` pinning everything transitive.
+- **Python (yt-dlp):** [`docker/requirements.txt`](docker/requirements.txt) is a hash-pinned lockfile generated from [`docker/requirements.in`](docker/requirements.in) with `pip-compile`. The image installs it with `--require-hashes`.
+- **Docker base image:** pinned by version and digest. The Dockerfile has no `# syntax=` line, so no floating frontend image is pulled.
+- **GitHub Actions:** pinned by commit SHA. Runners are pinned by version label, including the labels in the docker-build matrix; Renovate moves all of them together in one PR.
+- **Workflow tool pins:** `NODE_VERSION`, `BUILDX_VERSION` and `BUILDKIT_IMAGE` (tag and digest) at the top of `main.yaml`, updated by Renovate through their `# renovate:` comments. `NODE_VERSION` is grouped with the Dockerfile's node image so they stay in sync. Node stays on 22 LTS; majors are manual.
+- **Transitive dependencies** in both lockfiles are refreshed weekly by Renovate's lock file maintenance.
+- Debian packages (ffmpeg, python3, tini, build tools) are deliberately not version-pinned. The base image digest fixes the Debian release, and each build picks up the latest security patches.
+
+Renovate's commit types feed release-please:
+
+- `fix(deps)`: runtime dependencies (npm production packages, the Docker base image, the yt-dlp lockfile, lock file maintenance). They land in the next release PR as a patch bump. The release and its image are cut when that release PR is merged. Until then, `edge` picks them up.
+- `chore(deps)`: dev tooling, GitHub Actions and workflow tool pins. No release.
+- Renovate PRs get no CI, since nothing runs on pull requests. Their checks run after merge, on `main`, and a failure blocks building, tagging and releasing. Review major updates carefully before merging.
