@@ -22,5 +22,6 @@ npm-debug.log*
 .idea/
 .DS_Store
 
-# Local tooling
+# Claude Code
 .claude/worktrees/
+.claude/settings.local.json
