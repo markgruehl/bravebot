@@ -1,5 +1,5 @@
 /**
- * Shared contracts between the PLAYBACK, LIBRARY, INTERACTIONS and LEGACY modules.
+ * Shared contracts between the PLAYBACK, LIBRARY, INTERACTIONS, VOICE-ACTIVITY and PING modules.
  * Owned by SCAFFOLD. Change only by agreement: every module codes against these.
  *
  * Conventions
@@ -482,7 +482,7 @@ export interface AdminLog {
 }
 
 // ---------------------------------------------------------------------------
-// App context (built in index.ts, passed to interaction/legacy handlers)
+// App context (built in index.ts, passed to interaction, voice-activity and ping handlers)
 // ---------------------------------------------------------------------------
 
 export interface BotContext {

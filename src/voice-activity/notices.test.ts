@@ -1,7 +1,7 @@
 import type { VoiceState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BotContext } from '../types.js';
-import { describeVoiceChange, handleVoiceNotice } from './voiceNotices.js';
+import { describeVoiceChange, handleVoiceNotice } from './notices.js';
 
 const alice = { mention: '<@1>', name: 'alice' };
 const general = { mention: '<#10>', name: 'General' };

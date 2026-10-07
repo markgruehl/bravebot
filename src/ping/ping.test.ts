@@ -40,7 +40,7 @@ describe('handlePingMessage', () => {
     expect(other.send).not.toHaveBeenCalled();
   });
 
-  it('answers other bots, as the legacy bot did', async () => {
+  it('answers other bots, as the original Python bot did', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const other = fakeMessage('ping', 'uptime-bot', true);
     await handlePingMessage(other.message);
