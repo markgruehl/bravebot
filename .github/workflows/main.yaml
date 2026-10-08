@@ -109,16 +109,17 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Each build: id (artifact names), ref (commit to build), tag (release tag or ""),
-          # edge (also tag `edge`), verify (re-run the checks on ref before building).
-          build() { jq -nc --arg id "$1" --arg ref "$2" --arg tag "$3" --argjson edge "$4" --argjson verify "$5" \
-            '{id: $id, ref: $ref, tag: $tag, edge: $edge, verify: $verify}'; }
+          # Each build: id (artifact names), ref (what to check out), sha (its commit, for the
+          # revision label), tag (release tag or ""), edge (also tag `edge`), verify (re-run the
+          # checks on ref before building).
+          build() { jq -nc --arg id "$1" --arg ref "$2" --arg sha "$3" --arg tag "$4" --argjson edge "$5" --argjson verify "$6" \
+            '{id: $id, ref: $ref, sha: $sha, tag: $tag, edge: $edge, verify: $verify}'; }
           if [ "$RELEASE_CREATED" = "true" ] && [ "$RELEASE_SHA" = "$HEAD_SHA" ]; then
-            builds="[$(build main "$HEAD_SHA" "$TAG_NAME" true false)]"
+            builds="[$(build main "$HEAD_SHA" "$HEAD_SHA" "$TAG_NAME" true false)]"
           elif [ "$RELEASE_CREATED" = "true" ]; then
-            builds="[$(build release "$TAG_NAME" "$TAG_NAME" false true),$(build main "$HEAD_SHA" "" true false)]"
+            builds="[$(build release "$TAG_NAME" "$RELEASE_SHA" "$TAG_NAME" false true),$(build main "$HEAD_SHA" "$HEAD_SHA" "" true false)]"
           else
-            builds="[$(build main "$HEAD_SHA" "" true false)]"
+            builds="[$(build main "$HEAD_SHA" "$HEAD_SHA" "" true false)]"
           fi
           echo "$builds" | jq .
           echo "builds=$builds" >> "$GITHUB_OUTPUT"
@@ -176,14 +177,14 @@ jobs:
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       # Same tag rules as docker-manifest, so the OCI version label is X.Y.Z or edge.
-      # context: git, so the revision/created labels come from the checked-out commit (the
-      # release tag's commit when it differs from the pushed one).
+      # The revision label is set from the built commit (a release tag's commit can be older
+      # than the pushed one). Not `context: git`: the checkout is a detached HEAD, which it rejects.
       - name: Docker metadata (labels)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          context: git
           images: ${{ env.IMAGE }}
+          labels: org.opencontainers.image.revision=${{ matrix.build.sha }}
           tags: |
             type=semver,pattern={{version}},value=${{ matrix.build.tag }},enable=${{ matrix.build.tag != '' }}
             type=raw,value=edge,enable=${{ matrix.build.edge }}
