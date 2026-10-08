@@ -1,6 +1,8 @@
 name: Main
 
-# Trunk-based flow; runs only on pushes to main, never on pull requests.
+# Trunk-based flow on pushes to main. Pull requests get the unprivileged checks in pr.yaml.
+# Never add pull_request_target, workflow_run or issue_comment triggers, and never use
+# self-hosted runners: this is a public repo.
 #
 #   check            typecheck, lint, test, build
 #   release-please   (if checks pass) maintains the release PR; merging it tags vX.Y.Z
@@ -58,6 +60,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       # No install scripts: the checks don't need the native @discordjs/opus build.
+      - name: Check lockfile sources
+        run: .github/scripts/check-lockfile.sh
       - name: Install dependencies
         run: npm ci --ignore-scripts
       - name: Typecheck
@@ -132,6 +136,8 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.arch.runner }}
+    # Docker Hub secrets live in this environment, which only main may use.
+    environment: dockerhub
     permissions:
       contents: read
     env:
@@ -195,23 +201,7 @@ jobs:
           cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
 
       - name: Smoke test
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint sh bravebot:smoke -c 'yt-dlp --version && ffmpeg -hide_banner -version | head -n 1'
-          docker run --rm bravebot:smoke node -e '
-            const report = require("@discordjs/voice").generateDependencyReport();
-            console.log(report);
-            if (/@discordjs\/opus: not found|@snazzah\/davey: not found/.test(report)) process.exit(1);
-            const { OpusEncoder } = require("@discordjs/opus");
-            const enc = new OpusEncoder(48000, 2);
-            if (enc.decode(enc.encode(Buffer.alloc(3840))).length !== 3840) process.exit(1);
-            console.log("opus encode/decode ok");'
-          # Without a token the bot must load fully and exit 1 with its config error.
-          status=0
-          out=$(docker run --rm bravebot:smoke 2>&1) || status=$?
-          echo "$out"
-          test "$status" -eq 1
-          grep -q '\[config\] DISCORD_BOT_TOKEN is required' <<< "$out"
+        run: .github/scripts/smoke-test.sh bravebot:smoke
 
       - name: Log in to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -255,6 +245,7 @@ jobs:
       matrix:
         build: ${{ fromJSON(needs.plan.outputs.builds) }}
     runs-on: ubuntu-24.04
+    environment: dockerhub
     permissions:
       contents: read
     env:

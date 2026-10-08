@@ -167,7 +167,12 @@ Unit tests are `*.test.ts` files that sit next to the code they test, run with [
 
 ## Releases and images
 
-Development is trunk-based: changes merge to `main` over time. Everything runs in one workflow, [`.github/workflows/main.yaml`](.github/workflows/main.yaml), on pushes to `main`. **Nothing runs on pull requests.**
+Development is trunk-based: changes merge to `main` over time through pull requests. Two workflows run:
+
+- [`.github/workflows/pr.yaml`](.github/workflows/pr.yaml) checks pull requests (see [Pull request checks](#pull-request-checks)). It holds no secrets.
+- [`.github/workflows/main.yaml`](.github/workflows/main.yaml) runs on pushes to `main` and is the only workflow that can publish images.
+
+On `main`:
 
 1. Every push to `main` runs typecheck, lint, tests and a TypeScript build. Install scripts are disabled, so no dependency code runs at install time.
 2. If the checks pass, [release-please](https://github.com/googleapis/release-please) opens or updates a **release PR** from the [Conventional Commits](https://www.conventionalcommits.org/) on `main` (`feat:` → minor, `fix:` → patch, `feat!:` or `BREAKING CHANGE:` → major). It bumps `package.json` and `CHANGELOG.md`.
@@ -178,9 +183,22 @@ If checks fail, nothing is built, tagged or released. If release-please ever tag
 
 If a release image fails to publish, use **Re-run failed jobs** (build artifacts are kept 7 days). Re-runs never move tags backwards: `edge` only moves if that commit is still `main`'s head, and `latest`, `X` and `X.Y` only if that release is still the newest (`X.Y.Z` is always pushed). "Re-run all jobs" only rebuilds `edge`. To replace a release whose image never published, cut a new release.
 
-The workflow uses the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The arm64 jobs use GitHub's `ubuntu-24.04-arm` runner, which is free only for public repositories.
+The image jobs use the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets from the `dockerhub` environment, which only `main` may use. The arm64 jobs use GitHub's `ubuntu-24.04-arm` runner, which is free only for public repositories.
 
-**Prerequisite:** release-please opens its release PR with the workflow's `GITHUB_TOKEN`, so the repository must allow that. Enable **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"**.
+**Prerequisite:** release-please opens its release PR with the workflow's `GITHUB_TOKEN`, so the repository must allow that. Enable **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"**. GitHub holds PR checks for PRs created this way until someone with write access clicks **Approve workflows to run** on the release PR.
+
+### Pull request checks
+
+This is a public repository, so pull requests (from forks, and Renovate's dependency branches) run untrusted code: the PR's own changes, plus dependency code that lint, tests and the build load even with install scripts disabled. The PR workflow is built so that code has nothing worth stealing:
+
+- It triggers only on `pull_request`, never `pull_request_target`, `workflow_run` or `issue_comment`, which run with the repository's secrets and write access.
+- The token is read-only, no secrets or environments are referenced, nothing is pushed or logged into, and no caches are written that `main` could later restore.
+- Jobs run on fresh GitHub-hosted VMs. Never add self-hosted runners to this repository.
+- It runs the same checks as `main` (including a check that every `package-lock.json` entry comes from registry.npmjs.org with an integrity hash) and builds and smoke-tests both image architectures without pushing.
+- Fork PRs wait for maintainer approval before any workflow runs (**Settings → Actions → General → "Require approval for all external contributors"**).
+- `main.yaml` re-runs the checks on the merged commit before anything is built or published, so a PR that edits `pr.yaml` to fake a green check still can't ship an image.
+
+Before approving or merging, read changes to `.github/**`, `package.json`, `package-lock.json`, `Dockerfile`, `docker/**` and `.npmrc` closely. Ask outside contributors to leave lockfile changes out and regenerate them yourself.
 
 ### Dependency pinning and updates
 
@@ -190,12 +208,13 @@ Every dependency is pinned to an exact version, and [Renovate](https://docs.reno
 - **Python (yt-dlp):** [`docker/requirements.txt`](docker/requirements.txt) is a hash-pinned lockfile generated from [`docker/requirements.in`](docker/requirements.in) with `pip-compile`. The image installs it with `--require-hashes`.
 - **Docker base image:** pinned by version and digest. The Dockerfile has no `# syntax=` line, so no floating frontend image is pulled.
 - **GitHub Actions:** pinned by commit SHA. Runners are pinned by version label, including the labels in the docker-build matrix; Renovate moves all of them together in one PR.
-- **Workflow tool pins:** `NODE_VERSION`, `BUILDX_VERSION` and `BUILDKIT_IMAGE` (tag and digest) at the top of `main.yaml`, updated by Renovate through their `# renovate:` comments. `NODE_VERSION` is grouped with the Dockerfile's node image so they stay in sync. Node stays on 22 LTS; majors are manual.
-- **Transitive dependencies** in both lockfiles are refreshed weekly by Renovate's lock file maintenance.
+- **Workflow tool pins:** `NODE_VERSION`, `BUILDX_VERSION` and `BUILDKIT_IMAGE` (tag and digest) at the top of both `main.yaml` and `pr.yaml` (keep them identical), updated by Renovate through their `# renovate:` comments. `NODE_VERSION` is grouped with the Dockerfile's node image so they stay in sync. Node stays on 22 LTS; majors are manual.
+- **Supply-chain delay:** Renovate doesn't propose a new version until it's 7 days old, so compromised releases are usually caught and pulled first. Security fixes from vulnerability alerts skip the delay by design; review them by hand.
+- **Transitive dependencies** in both lockfiles are refreshed monthly by Renovate's lock file maintenance. These PRs aren't covered by the delay, so review the lockfile diff for new packages before merging.
 - Debian packages (ffmpeg, python3, tini, build tools) are deliberately not version-pinned. The base image digest fixes the Debian release, and each build picks up the latest security patches.
 
 Renovate's commit types feed release-please:
 
 - `fix(deps)`: runtime dependencies (npm production packages, the Docker base image, the yt-dlp lockfile, lock file maintenance). They land in the next release PR as a patch bump. The release and its image are cut when that release PR is merged. Until then, `edge` picks them up.
 - `chore(deps)`: dev tooling, GitHub Actions and workflow tool pins. No release.
-- Renovate PRs get no CI, since nothing runs on pull requests. Their checks run after merge, on `main`, and a failure blocks building, tagging and releasing. Review major updates carefully before merging.
+- Renovate PRs run the PR checks automatically (they're branches in this repository, so they aren't approval-gated, which is why the PR workflow must never hold secrets). Automerge is off: merge by hand after reviewing.

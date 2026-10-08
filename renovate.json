@@ -9,7 +9,10 @@
   "semanticCommits": "enabled",
   "lockFileMaintenance": {
     "enabled": true,
-    "description": "Refreshes transitive deps in package-lock.json and docker/requirements.txt; runtime-affecting, so fix",
+    "description": "Refreshes transitive deps in package-lock.json and docker/requirements.txt. Monthly, and not covered by minimumReleaseAge, so review the lockfile diff for new packages before merging. Runtime-affecting, so fix",
+    "schedule": [
+      "* 0-3 1 * *"
+    ],
     "semanticCommitType": "fix",
     "semanticCommitScope": "deps"
   },
@@ -24,9 +27,9 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Version pins in the workflow env annotated with `# renovate:` comments",
+      "description": "Version pins in the workflow env annotated with `# renovate:` comments (main.yaml and pr.yaml)",
       "managerFilePatterns": [
-        "/^\\.github/workflows/main\\.yaml$/"
+        "/^\\.github/workflows/(main|pr)\\.yaml$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\\s+[A-Z_]+: (?<currentValue>[^\\s@:]+)\\s",
@@ -37,7 +40,7 @@
       "customType": "regex",
       "description": "Runner labels in the docker-build matrix (runs-on uses ${{ matrix.arch.runner }}, which the github-actions manager can't see)",
       "managerFilePatterns": [
-        "/^\\.github/workflows/main\\.yaml$/"
+        "/^\\.github/workflows/(main|pr)\\.yaml$/"
       ],
       "matchStrings": [
         "runner: ubuntu-(?<currentValue>\\d+\\.\\d+)(-arm)?\\s"
@@ -47,6 +50,18 @@
     }
   ],
   "packageRules": [
+    {
+      "description": "Supply-chain delay: don't propose a version until it is 7 days old, so compromised releases are usually caught and pulled first (Shai-Hulud 2.0 versions were still live ~3 days after upload). github-runners has no release timestamps, so it is excluded. Security fixes (vulnerabilityAlerts) bypass this by design; review them by hand",
+      "matchDatasources": [
+        "npm",
+        "pypi",
+        "docker",
+        "github-tags",
+        "github-releases"
+      ],
+      "minimumReleaseAge": "7 days",
+      "internalChecksFilter": "strict"
+    },
     {
       "description": "Runtime dependencies (including the tar override, which ships in the image): land in the next release as a patch",
       "matchManagers": [

@@ -43,12 +43,14 @@ Local dev also needs ffmpeg and yt-dlp on `PATH` (`pip install --require-hashes 
 
 ## Dependencies
 
-- Everything is pinned exactly: npm versions (`.npmrc` has `save-exact`), the hash-pinned yt-dlp lockfile (regenerate with the `pip-compile` command in `docker/requirements.in`), the base image by digest, actions by SHA, and the tool pins at the top of `.github/workflows/main.yaml`. Keep it that way when adding anything.
-- Renovate (`renovate.json`) bumps the pins. Runtime updates use `fix(deps)`, tooling `chore(deps)`. Node stays on 22 LTS.
+- Everything is pinned exactly: npm versions (`.npmrc` has `save-exact`), the hash-pinned yt-dlp lockfile (regenerate with the `pip-compile` command in `docker/requirements.in`), the base image by digest, actions by SHA, and the tool pins at the top of `.github/workflows/main.yaml` and `pr.yaml` (keep both copies identical). Keep it that way when adding anything.
+- Renovate (`renovate.json`) bumps the pins, holding each new version for 7 days. Runtime updates use `fix(deps)`, tooling `chore(deps)`. Node stays on 22 LTS. Shared CI scripts live in `.github/scripts/`.
 - `@discordjs/opus` is compiled from source in the Dockerfile's `prod-deps` stage; see the comments there before changing that stage.
 
 ## Releases and images
 
 - Never create releases or push images by hand (`gh release create`, `docker push`). A manual release doesn't build an image and collides with release-please's versioning.
 - `.github/workflows/main.yaml` runs only on pushes to `main`: checks → release-please → native amd64/arm64 image builds. Every passing push publishes `edge`; merging the release-please PR cuts `vX.Y.Z` and the same image also gets `X.Y.Z`, `X.Y`, `X` and `latest`.
-- Never commit `.env` or tokens. CI secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) live in GitHub Actions secrets.
+- `.github/workflows/pr.yaml` checks PRs with no secrets and a read-only token. It runs untrusted code (fork PRs, Renovate branches, dependency code), so never give it secrets, an `environment:`, write permissions, cache writes or registry logins, and never switch it to `pull_request_target`/`workflow_run`/`issue_comment`. No self-hosted runners: the repo is public.
+- Docker Hub secrets live in the `dockerhub` environment, restricted to `main`.
+- Never commit `.env` or tokens. The CI secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are environment secrets in `dockerhub`; never add them as repository secrets, where PR branch runs could read them.
