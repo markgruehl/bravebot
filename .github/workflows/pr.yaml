@@ -31,7 +31,7 @@ env:
 jobs:
   check:
     name: Typecheck, lint, test, build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -67,9 +67,9 @@ jobs:
       matrix:
         arch:
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.arch.runner }}
     permissions:
       contents: read
