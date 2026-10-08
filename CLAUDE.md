@@ -1,6 +1,12 @@
 # bravebot
 
-A small Discord bot for a friends' server. It posts to a guild's system channel (and optionally a Slack webhook) whenever a member connects to, disconnects from, or moves between voice channels, and replies `pong` to `ping`.
+A Discord bot for a friends' server, written in TypeScript (discord.js v14 + @discordjs/voice) and run as a Docker container. Its features:
+
+- **Soundboard:** play an uploaded file, a URL (direct audio, or YouTube/SoundCloud/etc. via yt-dlp) or a saved library sound into the caller's voice channel, with interrupt/queue modes, `/stop`, `/skip` and `/volume`.
+- **Voice activity notices:** join/leave/move messages in the guild's system channel, optionally mirrored to Slack.
+- **Ping:** replies `pong` to `ping`.
+
+The README is the user-facing reference (commands, permissions, setup, releases). Read it before changing behavior.
 
 ## Git workflow
 
@@ -12,34 +18,39 @@ A small Discord bot for a friends' server. It posts to a guild's system channel 
   ```
   `--no-track` keeps the new branch from tracking `origin/main`, so a bare `git push` can't land on `main`.
   Branch prefixes: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`.
-- Use Conventional Commits with a scope, matching the existing history: `feat(bot): ...`, `chore(deps): ...`.
+- Use Conventional Commits. They drive releases: `feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major; `chore:`, `ci:`, `docs:`, `refactor:` don't release.
 - Push with `git push -u origin HEAD`, then open a PR against `main`: `gh pr create --base main`.
 - After the PR merges, clean up: `git worktree remove .claude/worktrees/<short-name>`, then `git branch -D <branch>` (`-D` because squash/rebase merges leave the branch looking unmerged).
 
 ## Architecture
 
-- `main.py` is a single-file `discord.py` Gateway client (`BraveBot(discord.Client)`). It enables the `message_content` and `voice_states` intents. `message_content` is privileged, so it must also be enabled in the Discord Developer Portal (Bot → Privileged Gateway Intents).
-- Config comes from env vars (see `.env.example`): `DISCORD_BOT_TOKEN` (required) and `SLACK_WEBHOOK` (meant to be optional).
-- Dependencies are pinned in `requirements.txt`. `discord.py==2.2.2` imports `audioop`, which was removed in Python 3.13, so use Python 3.11 (matching the image) or 3.12.
-- Lint with `uvx ruff check .` (config in `pyproject.toml`; nothing runs it automatically). `main.py` already has violations, so don't mass-fix unrelated code in a feature PR.
-- There are no tests yet.
+- `src/index.ts` wires the client (intents: Guilds, GuildVoiceStates, GuildMessages, MessageContent; MessageContent is privileged and must be enabled in the Developer Portal). `src/types.ts` holds the shared contracts; `src/config.ts` reads env (`DISCORD_BOT_TOKEN` required, `SLACK_WEBHOOK` optional).
+- Soundboard: `src/playback/` (source validation, yt-dlp/ffmpeg pipeline, pure queue state machine in `queue.ts`, per-guild player), `src/library/` (saved sounds), `src/guild/` (channel setup and the admin log), `src/interactions/` (commands, panel, context menu, permission checks).
+- Voice activity: `src/voice-activity/` (`notices.ts`, `slack.ts`). Ping: `src/ping/`.
+- **Stateless:** nothing is written to local disk. Saved sounds live as bot messages in a private `#soundboard-library` channel and the admin log in `#soundboard-log`, both found by a topic marker and rebuilt on startup. Discord attachment URLs expire, so never cache them long-term.
+- Keep Discord-API code thin and put logic in pure functions with `*.test.ts` next to them.
 
-### Known bugs in `main.py`
+## Commands
 
-- The Slack guard `if SLACK_WEBHOOK is not None or SLACK_WEBHOOK != ""` is always true. When `SLACK_WEBHOOK` is unset or empty, `requests.post` raises before the Discord message is sent, so in practice `SLACK_WEBHOOK` is required for voice notifications. It should be `if SLACK_WEBHOOK:`.
-- The early return `if guild.system_channel is None and member.bot` should use `or`. Today a guild without a system channel crashes on `.send`, and bots' voice changes are announced.
+```sh
+npm ci                 # install (CI uses --ignore-scripts; the checks don't need the native opus build)
+npm run dev            # tsx watch; reads .env if present
+npm run typecheck && npm run lint && npm test && npm run build
+docker compose up --build
+```
 
-## Running and deploying (Docker)
+Local dev also needs ffmpeg and yt-dlp on `PATH` (`pip install --require-hashes -r docker/requirements.txt`).
 
-The bot runs as a long-lived Docker container. That's the deployment target; there are no plans to move it to a serverless platform.
+## Dependencies
 
-- `Dockerfile`: multi-stage build on `python:3.11.2-slim`; installs `requirements.txt`, copies the repo, then runs `python3 main.py`.
-- `docker-compose.yaml`: builds the image and bind-mounts the repo into `/usr/src/app`, so local code changes apply on a container restart without a rebuild. It doesn't pass any env vars; add `env_file: .env` to the service or use `docker compose run -e DISCORD_BOT_TOKEN=... bot`.
-- Run locally without Docker:
-  ```sh
-  python3.11 -m venv .venv && . .venv/bin/activate
-  pip install -r requirements.txt
-  DISCORD_BOT_TOKEN=... SLACK_WEBHOOK=... python main.py
-  ```
-- Releases: publishing a GitHub release triggers `.github/workflows/ci.yaml`, which builds the image and pushes `<DOCKERHUB_USERNAME>/bravebot:latest` and `<DOCKERHUB_USERNAME>/bravebot:<release name>` (`marksansome11/bravebot` on Docker Hub). The image tag comes from the release **title**, not the git tag, so always pass a tag-safe title: `gh release create v1.2.0 --title v1.2.0`. Publishing a release is outward-facing, so confirm before running it.
-- Never commit `.env` or tokens. Secrets for CI (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) live in GitHub Actions secrets.
+- Everything is pinned exactly: npm versions (`.npmrc` has `save-exact`), the hash-pinned yt-dlp lockfile (regenerate with the `pip-compile` command in `docker/requirements.in`), the base image by digest, actions by SHA, and the tool pins at the top of `.github/workflows/main.yaml` and `pr.yaml` (keep both copies identical). Keep it that way when adding anything.
+- Renovate (`renovate.json`) bumps the pins, holding each new version for 7 days. Runtime updates use `fix(deps)`, tooling `chore(deps)`. Node stays on 22 LTS. Shared CI scripts live in `.github/scripts/`.
+- `@discordjs/opus` is compiled from source in the Dockerfile's `prod-deps` stage; see the comments there before changing that stage.
+
+## Releases and images
+
+- Never create releases or push images by hand (`gh release create`, `docker push`). A manual release doesn't build an image and collides with release-please's versioning.
+- `.github/workflows/main.yaml` runs only on pushes to `main`: checks → release-please → native amd64/arm64 image builds. Every passing push publishes `edge`; merging the release-please PR cuts `vX.Y.Z` and the same image also gets `X.Y.Z`, `X.Y`, `X` and `latest`.
+- `.github/workflows/pr.yaml` checks PRs with no secrets and a read-only token. It runs untrusted code (fork PRs, Renovate branches, dependency code), so never give it secrets, an `environment:`, write permissions, cache writes or registry logins, and never switch it to `pull_request_target`/`workflow_run`/`issue_comment`. No self-hosted runners: the repo is public.
+- Docker Hub secrets live in the `production` environment, restricted to `main`.
+- Never commit `.env` or tokens. The CI secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are environment secrets in `production`; never add them as repository secrets, where PR branch runs could read them.

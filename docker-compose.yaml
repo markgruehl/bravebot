@@ -1,8 +1,12 @@
-version: '3.7'
+# Local development: builds the production image and runs it with your .env.
+#   cp .env.example .env   # then fill in DISCORD_BOT_TOKEN
+#   docker compose up --build
 services:
   bot:
     build:
       context: .
       dockerfile: Dockerfile
-    volumes:
-      - .:/usr/src/app
+    image: bravebot:local
+    env_file: .env
+    restart: unless-stopped
+    # No `init: true`: the image runs tini as PID 1 itself.
