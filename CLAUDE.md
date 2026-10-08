@@ -52,5 +52,5 @@ Local dev also needs ffmpeg and yt-dlp on `PATH` (`pip install --require-hashes 
 - Never create releases or push images by hand (`gh release create`, `docker push`). A manual release doesn't build an image and collides with release-please's versioning.
 - `.github/workflows/main.yaml` runs only on pushes to `main`: checks → release-please → native amd64/arm64 image builds. Every passing push publishes `edge`; merging the release-please PR cuts `vX.Y.Z` and the same image also gets `X.Y.Z`, `X.Y`, `X` and `latest`.
 - `.github/workflows/pr.yaml` checks PRs with no secrets and a read-only token. It runs untrusted code (fork PRs, Renovate branches, dependency code), so never give it secrets, an `environment:`, write permissions, cache writes or registry logins, and never switch it to `pull_request_target`/`workflow_run`/`issue_comment`. No self-hosted runners: the repo is public.
-- Docker Hub secrets live in the `dockerhub` environment, restricted to `main`.
-- Never commit `.env` or tokens. The CI secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are environment secrets in `dockerhub`; never add them as repository secrets, where PR branch runs could read them.
+- Docker Hub secrets live in the `production` environment, restricted to `main`.
+- Never commit `.env` or tokens. The CI secrets (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) are environment secrets in `production`; never add them as repository secrets, where PR branch runs could read them.

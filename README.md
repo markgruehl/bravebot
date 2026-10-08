@@ -183,7 +183,7 @@ If checks fail, nothing is built, tagged or released. If release-please ever tag
 
 If a release image fails to publish, use **Re-run failed jobs** (build artifacts are kept 7 days). Re-runs never move tags backwards: `edge` only moves if that commit is still `main`'s head, and `latest`, `X` and `X.Y` only if that release is still the newest (`X.Y.Z` is always pushed). "Re-run all jobs" only rebuilds `edge`. To replace a release whose image never published, cut a new release.
 
-The image jobs use the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets from the `dockerhub` environment, which only `main` may use. The arm64 jobs use GitHub's `ubuntu-24.04-arm` runner, which is free only for public repositories.
+The image jobs use the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets from the `production` environment, which only `main` may use. The arm64 jobs use GitHub's `ubuntu-24.04-arm` runner, which is free only for public repositories.
 
 **Prerequisite:** release-please opens its release PR with the workflow's `GITHUB_TOKEN`, so the repository must allow that. Enable **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"**. GitHub holds PR checks for PRs created this way until someone with write access clicks **Approve workflows to run** on the release PR.
 
