@@ -2,8 +2,9 @@
  * Minimal fakes of discord.js interactions / BotContext for handler tests.
  * Only the members our handlers touch are implemented.
  */
-import { PermissionsBitField } from 'discord.js';
+import { MessageFlags, MessageFlagsBitField, PermissionsBitField } from 'discord.js';
 import { vi, type Mock } from 'vitest';
+import type { GuildVoiceHistory, PersonInfo, StatsService } from '../../stats/types.js';
 import type { AdminLogEvent, BotContext, GuildState, LibrarySound, LibraryStore, PlayerManager } from '../../types.js';
 
 export const GUILD_ID = 'guild-1';
@@ -35,9 +36,32 @@ export function makeLibrary(sounds: LibrarySound[] = []): LibraryStore & {
   };
 }
 
+export type StatsMock = { [K in keyof StatsService]: Mock<StatsService[K]> };
+
+export const EMPTY_HISTORY: GuildVoiceHistory = { channelId: 'sys-1', events: [], checkpoints: [], oldestEventAt: null };
+
+/**
+ * StatsService fake: an empty history, every id resolves to a human named "Name <id>",
+ * nothing cached. Override per test with statsMock.<method>.mockResolvedValue(...).
+ */
+export function makeStatsMock(): StatsMock {
+  return {
+    load: vi.fn<StatsService['load']>(async () => EMPTY_HISTORY),
+    record: vi.fn<StatsService['record']>(),
+    forget: vi.fn<StatsService['forget']>(),
+    noteStartup: vi.fn<StatsService['noteStartup']>(),
+    dropGuild: vi.fn<StatsService['dropGuild']>(),
+    people: vi.fn<StatsService['people']>(
+      async (_guild, ids) => new Map<string, PersonInfo>([...ids].map((id) => [id, { name: `Name ${id}`, bot: false }])),
+    ),
+    status: vi.fn<StatsService['status']>(() => null),
+  };
+}
+
 export interface FakeCtx extends BotContext {
   readonly logged: AdminLogEvent[];
   readonly playersMock: { [K in keyof PlayerManager]: ReturnType<typeof vi.fn> };
+  readonly statsMock: StatsMock;
 }
 
 export function makeCtx(opts: { ready?: boolean; library?: LibraryStore; botChannelId?: string | null } = {}): FakeCtx {
@@ -62,6 +86,7 @@ export function makeCtx(opts: { ready?: boolean; library?: LibraryStore; botChan
     on: vi.fn(),
     off: vi.fn(),
   };
+  const statsMock = makeStatsMock();
   return {
     client: {} as BotContext['client'],
     config: { discordToken: 't', slackWebhook: null },
@@ -74,6 +99,8 @@ export function makeCtx(opts: { ready?: boolean; library?: LibraryStore; botChan
       }),
     },
     logged,
+    stats: statsMock,
+    statsMock,
   };
 }
 
@@ -88,12 +115,46 @@ export interface FakeInteractionOptions {
   readonly guildPerms?: bigint[];
   readonly options?: Record<string, unknown>;
   readonly subcommand?: string;
+  readonly commandName?: string;
+  /** Guild voice states (guild.voiceStates.cache). */
+  readonly voiceStates?: readonly FakeVoiceState[];
+  /** Guild channels by id -> name (guild.channels.cache). */
+  readonly channels?: Readonly<Record<string, string>>;
+}
+
+export interface FakeVoiceState {
+  readonly id: string;
+  readonly channelId: string | null;
+  readonly member: { readonly user: { readonly bot: boolean } } | null;
+}
+
+export interface FakeReply {
+  kind: 'reply' | 'editReply' | 'followUp';
+  content?: string;
+  flags?: unknown;
+  embeds?: unknown[];
+  components?: unknown[];
+}
+
+interface FakePayload {
+  content?: string;
+  flags?: unknown;
+  embeds?: unknown[];
+  components?: unknown[];
+  allowedMentions?: unknown;
+}
+
+/** Record a reply, keeping only the keys the payload actually set (so toEqual stays exact). */
+function record(kind: FakeReply['kind'], p: FakePayload, keys: readonly (keyof FakePayload)[]): FakeReply {
+  const entry: FakeReply = { kind, content: p.content as string };
+  for (const key of keys) if (p[key] !== undefined) (entry as unknown as Record<string, unknown>)[key] = p[key];
+  return entry;
 }
 
 export function makeInteraction(o: FakeInteractionOptions = {}) {
   const voiceChannelId = o.voiceChannelId === undefined ? 'vc-1' : o.voiceChannelId;
   const opts = o.options ?? {};
-  const replies: { kind: 'reply' | 'editReply' | 'followUp'; content: string; flags?: unknown }[] = [];
+  const replies: FakeReply[] = [];
   const get = (name: string) => (name in opts ? opts[name] : null);
   const required = (name: string, req?: boolean) => {
     const v = get(name);
@@ -102,7 +163,8 @@ export function makeInteraction(o: FakeInteractionOptions = {}) {
   };
   const interaction = {
     guildId: GUILD_ID,
-    user: { id: o.userId ?? 'u1', username: 'user1' },
+    commandName: o.commandName ?? 'test',
+    user: { id: o.userId ?? 'u1', username: 'user1', bot: false },
     member: {
       displayName: 'User One',
       permissions: new PermissionsBitField(o.guildPerms ?? []),
@@ -112,30 +174,62 @@ export function makeInteraction(o: FakeInteractionOptions = {}) {
       },
       permissionsIn: vi.fn(() => new PermissionsBitField(o.channelPerms ?? [])),
     },
+    guild: {
+      id: GUILD_ID,
+      voiceStates: { cache: new Map((o.voiceStates ?? []).map((v) => [v.id, v])) },
+      channels: { cache: new Map(Object.entries(o.channels ?? {}).map(([id, name]) => [id, { id, name }])) },
+      members: { me: { id: 'bot-self' } },
+    },
     deferred: false,
     replied: false,
+    ephemeral: null as boolean | null,
     options: {
       getString: (n: string, req?: boolean) => required(n, req) as string | null,
       getInteger: (n: string, req?: boolean) => required(n, req) as number | null,
       getAttachment: (n: string, req?: boolean) => required(n, req),
+      getUser: (n: string, req?: boolean) => required(n, req) as { id: string; bot: boolean } | null,
+      getChannel: (n: string, req?: boolean) => required(n, req) as { id: string } | null,
       getSubcommand: () => o.subcommand ?? null,
     },
     replies,
-    deferReply: vi.fn(async () => {
+    isChatInputCommand: () => true,
+    isMessageContextMenuCommand: () => false,
+    isAutocomplete: () => false,
+    isButton: () => false,
+    isRepliable: () => true,
+    inGuild: () => true,
+    inCachedGuild: () => true,
+    deferReply: vi.fn(async (p?: { flags?: unknown }) => {
       interaction.deferred = true;
+      interaction.ephemeral = p?.flags === MessageFlags.Ephemeral;
     }),
-    reply: vi.fn(async (p: { content: string; flags?: unknown }) => {
+    reply: vi.fn(async (p: FakePayload) => {
       interaction.replied = true;
-      replies.push({ kind: 'reply', content: p.content, flags: p.flags });
+      replies.push(record('reply', p, ['flags', 'embeds', 'components']));
     }),
-    editReply: vi.fn(async (p: { content: string }) => {
+    editReply: vi.fn(async (p: FakePayload) => {
       interaction.replied = true;
-      replies.push({ kind: 'editReply', content: p.content });
+      replies.push(record('editReply', p, ['embeds', 'components']));
     }),
-    followUp: vi.fn(async (p: { content: string; flags?: unknown }) => {
-      replies.push({ kind: 'followUp', content: p.content, flags: p.flags });
+    followUp: vi.fn(async (p: FakePayload) => {
+      replies.push(record('followUp', p, ['flags', 'embeds', 'components']));
     }),
   };
+  return interaction;
+}
+
+/** A button click on a message (ephemeral or public) carrying `customId`. */
+export function makeButtonInteraction(o: FakeInteractionOptions & { customId: string; ephemeralMessage?: boolean }) {
+  const base = makeInteraction(o);
+  const interaction = Object.assign(base, {
+    customId: o.customId,
+    message: { flags: new MessageFlagsBitField(o.ephemeralMessage ? MessageFlags.Ephemeral : 0) },
+    isChatInputCommand: () => false,
+    isButton: () => true,
+    deferUpdate: vi.fn(async () => {
+      base.deferred = true;
+    }),
+  });
   return interaction;
 }
 

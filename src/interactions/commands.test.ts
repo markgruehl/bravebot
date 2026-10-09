@@ -1,12 +1,21 @@
 import {
   ApplicationCommandOptionType,
   ApplicationCommandType,
+  ChannelType,
   InteractionContextType,
   type APIApplicationCommandOption,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
 } from 'discord.js';
 import { describe, expect, it, vi } from 'vitest';
-import { COMMANDS, OPTIONS, PLAY_CONTEXT_MENU_NAME, SOUND_SUBCOMMANDS, buildCommandDefinitions, registerCommands } from './commands.js';
+import {
+  COMMANDS,
+  OPTIONS,
+  PLAY_CONTEXT_MENU_NAME,
+  SOUND_SUBCOMMANDS,
+  STATS_SUBCOMMANDS,
+  buildCommandDefinitions,
+  registerCommands,
+} from './commands.js';
 
 const defs = buildCommandDefinitions();
 const byName = (name: string) => defs.find((d) => d.name === name)!;
@@ -56,6 +65,47 @@ describe('buildCommandDefinitions', () => {
     expect(rename.options?.[0]).toMatchObject({ name: OPTIONS.sound, required: true, autocomplete: true });
     const del = subs.find((s) => s.name === 'delete')!;
     expect(del.options?.[0]).toMatchObject({ name: OPTIONS.sound, required: true, autocomplete: true });
+  });
+
+  it('/stats has server, user, channel subcommands, each with an optional days 1-365', () => {
+    type Opt = { name: string; type: number; required?: boolean; min_value?: number; max_value?: number; channel_types?: number[]; description: string };
+    const subs = optionsOf(COMMANDS.stats) as { name: string; type: number; options?: Opt[] }[];
+    expect(subs.map((s) => s.name)).toEqual(Object.values(STATS_SUBCOMMANDS));
+    expect(subs.every((s) => s.type === ApplicationCommandOptionType.Subcommand)).toBe(true);
+    for (const sub of subs) {
+      const days = sub.options?.find((o) => o.name === OPTIONS.days);
+      expect(days, sub.name).toMatchObject({ type: ApplicationCommandOptionType.Integer, min_value: 1, max_value: 365 });
+      expect(days?.required ?? false).toBe(false);
+      expect(days?.description).toContain('default 30');
+    }
+    const server = subs.find((s) => s.name === 'server')!;
+    expect(server.options?.map((o) => o.name)).toEqual([OPTIONS.days]);
+    const user = subs.find((s) => s.name === 'user')!;
+    expect(user.options?.map((o) => o.name)).toEqual([OPTIONS.user, OPTIONS.days]);
+    expect(user.options?.[0]).toMatchObject({ type: ApplicationCommandOptionType.User });
+    expect(user.options?.[0]?.required ?? false).toBe(false);
+    const channel = subs.find((s) => s.name === 'channel')!;
+    expect(channel.options?.map((o) => o.name)).toEqual([OPTIONS.channel, OPTIONS.days]);
+    expect(channel.options?.[0]).toMatchObject({
+      type: ApplicationCommandOptionType.Channel,
+      required: true,
+      channel_types: [ChannelType.GuildVoice, ChannelType.GuildStageVoice],
+    });
+  });
+
+  it('/info takes no options', () => {
+    expect(optionsOf(COMMANDS.info)).toEqual([]);
+  });
+
+  it('keeps descriptions within Discord limits', () => {
+    const walk = (opts: { description: string; options?: unknown[] }[]): void => {
+      for (const o of opts) {
+        expect(o.description.length).toBeGreaterThan(0);
+        expect(o.description.length).toBeLessThanOrEqual(100);
+        walk((o.options ?? []) as { description: string; options?: unknown[] }[]);
+      }
+    };
+    walk(defs.filter((d) => d.type !== ApplicationCommandType.Message) as { description: string; options?: unknown[] }[]);
   });
 
   it('defines the message context menu', () => {
