@@ -4,17 +4,19 @@
  * message if possible, and log an admin 'failure' (reason 'internal-error').
  * Ignore interactions outside guilds.
  */
-import type { Interaction } from 'discord.js';
+import { MessageFlags, type Interaction } from 'discord.js';
 import { errorMessage } from '../errors.js';
 import type { BotContext } from '../types.js';
 import { handleAutocomplete } from './autocomplete.js';
 import { COMMANDS, PLAY_CONTEXT_MENU_NAME } from './commands.js';
 import { handlePlayContextMenu } from './contextMenu.js';
 import { handleSkipCommand, handleStopCommand, handleVolumeCommand } from './controls.js';
+import { handleInfoCommand } from './info.js';
 import { handlePanelButton, handleSoundboardCommand, isPanelCustomId } from './panel.js';
 import { handlePlayCommand } from './play.js';
 import { logFailure, replyEphemeral, userRefOf } from './reply.js';
 import { handleSoundCommand } from './sound.js';
+import { handleStatsButton, handleStatsCommand, isStatsCustomId } from './stats.js';
 import { MESSAGES } from './validation.js';
 
 /** Short label of what was attempted, for the admin log. */
@@ -24,7 +26,7 @@ export function describeInteraction(interaction: Interaction): string {
     return sub ? `/${interaction.commandName} ${sub}` : `/${interaction.commandName}`;
   }
   if (interaction.isMessageContextMenuCommand()) return 'context menu';
-  if (interaction.isButton()) return 'panel button';
+  if (interaction.isButton()) return isStatsCustomId(interaction.customId) ? 'stats button' : 'panel button';
   if (interaction.isAutocomplete()) return 'autocomplete';
   return 'interaction';
 }
@@ -48,6 +50,10 @@ async function dispatch(ctx: BotContext, interaction: Interaction<'cached'>): Pr
         return handleVolumeCommand(ctx, interaction);
       case COMMANDS.sound:
         return handleSoundCommand(ctx, interaction);
+      case COMMANDS.stats:
+        return handleStatsCommand(ctx, interaction);
+      case COMMANDS.info:
+        return handleInfoCommand(ctx, interaction);
       default:
         await replyEphemeral(interaction, MESSAGES.unknownCommand);
         return;
@@ -61,8 +67,9 @@ async function dispatch(ctx: BotContext, interaction: Interaction<'cached'>): Pr
     }
     return;
   }
-  if (interaction.isButton() && isPanelCustomId(interaction.customId)) {
-    await handlePanelButton(ctx, interaction);
+  if (interaction.isButton()) {
+    if (isStatsCustomId(interaction.customId)) await handleStatsButton(ctx, interaction);
+    else if (isPanelCustomId(interaction.customId)) await handlePanelButton(ctx, interaction);
   }
   // Anything else (other components, modals) is not ours: ignore.
 }
@@ -94,7 +101,13 @@ export async function handleInteraction(ctx: BotContext, interaction: Interactio
     });
     if (interaction.isRepliable()) {
       try {
-        await replyEphemeral(interaction, MESSAGES.internalError);
+        if (interaction.isButton() && interaction.deferred && !interaction.replied && interaction.ephemeral === null) {
+          // deferUpdate() (stats paging) leaves `ephemeral` null: editReply would overwrite the
+          // message the button is on, so post the error separately.
+          await interaction.followUp({ content: MESSAGES.internalError, flags: MessageFlags.Ephemeral, allowedMentions: { parse: [] } });
+        } else {
+          await replyEphemeral(interaction, MESSAGES.internalError);
+        }
       } catch (replyErr) {
         console.error('[interaction] could not send error reply:', replyErr);
       }

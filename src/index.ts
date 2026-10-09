@@ -14,6 +14,7 @@ import { handlePingMessage } from './ping/ping.js';
 import { handleVoiceNotice } from './voice-activity/notices.js';
 import { createLibraryStore } from './library/store.js';
 import { createPlayerManager } from './playback/player.js';
+import { createStatsService } from './stats/cache.js';
 import type { BotContext, GuildRegistry } from './types.js';
 
 function loadConfigOrExit(): Config {
@@ -64,7 +65,9 @@ const players = createPlayerManager({
 
 const adminLog = createAdminLog((guildId) => guilds.get(guildId)?.channels.log);
 
-const ctx: BotContext = { client, config, players, guilds, adminLog, ensureGuild };
+const stats = createStatsService({ client });
+
+const ctx: BotContext = { client, config, players, guilds, adminLog, stats, ensureGuild };
 
 // Player events -> admin log (play-time failures happen asynchronously).
 players.on('trackError', ({ guildId, channelId, track, code, error }) => {
@@ -175,22 +178,26 @@ client.once(Events.ClientReady, async (readyClient) => {
     console.error('[commands] registration failed:', err);
   }
   // Unavailable guilds (outage at login) are set up when GuildAvailable fires.
-  await Promise.allSettled(
-    readyClient.guilds.cache.filter((guild) => guild.available).map((guild) => initGuild(guild)),
-  );
+  const available = readyClient.guilds.cache.filter((guild) => guild.available);
+  // Who is already in voice: their sessions started before any notice we will see.
+  for (const guild of available.values()) stats.noteStartup(guild);
+  await Promise.allSettled(available.map((guild) => initGuild(guild)));
 });
 
 client.on(Events.GuildCreate, (guild) => {
+  stats.noteStartup(guild);
   void initGuild(guild);
 });
 
 // A guild that was unavailable (at login or after an outage) came back.
 client.on(Events.GuildAvailable, (guild) => {
+  stats.noteStartup(guild);
   if (!guilds.has(guild.id)) void initGuild(guild);
 });
 
 client.on(Events.GuildDelete, (guild) => {
   guilds.delete(guild.id);
+  stats.dropGuild(guild.id);
   setupCooldown.forget(guild.id);
   players.destroyGuild(guild.id);
 });
@@ -212,13 +219,16 @@ client.on(Events.ChannelDelete, (channel) => {
 });
 
 // Library messages deleted by hand: drop those sounds from the index (frees their names).
+// Deleted voice notices: drop them from the stats history (the service checks the channel).
 client.on(Events.MessageDelete, (message) => {
   if (!message.guildId) return;
+  stats.forget(message.guildId, message.channelId, [message.id]);
   const state = guilds.get(message.guildId);
   if (state && message.channelId === state.channels.library.id) state.library.forget([message.id]);
 });
 
 client.on(Events.MessageBulkDelete, (messages, channel) => {
+  stats.forget(channel.guildId, channel.id, messages.keys());
   const state = guilds.get(channel.guildId);
   if (state && channel.id === state.channels.library.id) state.library.forget(messages.keys());
 });

@@ -55,6 +55,23 @@ export class PlaybackError extends Error {
   }
 }
 
+export type StatsErrorCode =
+  | 'no-system-channel' // the guild has no system channel, so there are no voice notices
+  | 'missing-access' // the bot cannot view / read history in the system channel
+  | 'history-failed'; // reading the system channel history failed (Discord error, timeout)
+
+/** Expected failures while loading voice stats history. The message is user-facing. */
+export class StatsError extends Error {
+  override readonly name = 'StatsError';
+  constructor(
+    readonly code: StatsErrorCode,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+  }
+}
+
 /** Best-effort conversion of an unknown thrown value into a short message for logs. */
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;

@@ -1,6 +1,6 @@
 # bravebot
 
-A multi-server Discord soundboard bot. It plays one-off audio files, links (direct audio, YouTube, SoundCloud and anything else [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports) and a saved per-server sound library into your voice channel. It also posts voice-channel activity notices.
+A multi-server Discord soundboard bot. It plays one-off audio files, links (direct audio, YouTube, SoundCloud and anything else [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports) and a saved per-server sound library into your voice channel. It also posts voice-channel activity notices and turns them into voice stats.
 
 Docker images are published on [Docker Hub](https://hub.docker.com/r/marksansome11/bravebot).
 
@@ -38,7 +38,7 @@ The private channel `#soundboard-log` records:
 - every play: who, what, when, which voice channel, interrupt or queue, volume and playlist item count
 - stop, skip and volume actions
 - library adds, renames and deletes
-- failures and denials, such as not being in voice, a missing permission, the bot being busy elsewhere, a bad URL, or an extraction or playback error
+- failures and denials, such as not being in voice, a missing permission, the bot being busy elsewhere, a bad URL, an extraction or playback error, or voice stats that could not be read (viewing stats is not logged)
 
 For one-off uploads, only the filename and link are logged. The file is not re-attached.
 
@@ -51,6 +51,36 @@ Both channels are created with `@everyone` denied **View Channel** and an explic
 When a member connects to, disconnects from or moves between voice channels, the bot posts to the server's [system channel](https://support.discord.com/hc/en-us/articles/213224807), for example `@alice has connected to #General` or `@alice has changed channels from #General to #Gaming`. Mute, deafen and other same-channel changes are ignored. Bots are ignored, and nothing is posted when the server has no system channel.
 
 If `SLACK_WEBHOOK` is set, the same notices are mirrored to Slack using plain names instead of mentions. Slack failures are logged and never crash the bot.
+
+### Voice stats
+
+`/stats` turns the voice activity notices into stats for the last 1–365 days (default 30):
+
+- **`/stats server`** is a paged summary of the server: **Overview** (time in voice, people, calls and the trend against the previous period of the same length), **People** (time, sessions, marathons, streaks, night owls), **Social** (pairs, groups, best friends, social glue, who starts and who closes calls), **Channels**, **Times** (an hour × weekday heatmap and prime time) and **Records** (longest call, biggest party, busiest day, longest session, longest streak).
+- **`/stats user`** is a "Wrapped"-style card for one person (you by default): rank, total time and trend, sessions, top channel, best friend and crew, signature hour, streaks, night owl share, calls started and closed, and a one-line persona.
+- **`/stats channel`** shows the same pages for one voice channel (without the Channels page).
+
+Replies are private and come with a **Share** button that posts the current view to the channel. Anyone can page through a shared post. Stats never ping anyone: people are shown by name (server display name, then username, then "Former member").
+
+How it works:
+
+- **Data source:** the join/leave/move notices the bot itself posted in the system channel, including the ones from the old Python version of the bot (same account, same text). Notices posted by anyone else are ignored, and so are bots. If you delete notices, they drop out of the stats. If the server never had a system channel, or the bot can't read it, there are no stats.
+- **No storage:** the first `/stats` after a restart reads up to two years of the system channel's history into memory, which can take a little while. After that, every new notice is added as it's posted. Nothing is written to disk.
+- **Time zone:** days, hours, streaks and the heatmap use Eastern time (`America/Toronto`).
+- **Leaves and moves:** a leave or move notice from the channel the bot thought the person was in is always trusted, however long the session before it was.
+- **Missed leaves:** while the bot was down, it may have missed someone leaving. "Last seen" below means their last notice, or a startup that saw them in voice. The bot only assumes a missed leave when:
+  - someone joins again, or leaves or moves out of a different channel than the bot thought they were in, more than 12 hours after they were last seen. The old session is cut off 12 hours after they were last seen.
+  - the bot sees someone in voice (at startup or when you run `/stats`) who was last seen more than 12 hours ago. The old session is cut off the same way, so someone who stays in voice for more than 12 hours with no notice shows 12 hours until they leave.
+  - someone the bot thought was in voice is gone at startup (or when you run `/stats`). Their session ends at the bot's last notice before that point, and never more than 12 hours after they were last seen.
+  - someone joins a different channel without leaving the first one. The old session ends at the new join.
+
+  These sessions count as estimated.
+- **Startup and now:** people who are already in voice when the bot starts are counted from startup, since the bot can't know when they joined. People in voice right now count up to now.
+- **Streaks:** a streak day needs at least 1 minute in voice. Streaks count over all the cached history (up to two years), whatever `days` you pick, so a 7-day view can still show a 40-day streak. The longest-streak record only considers people with time in the period.
+- **Calls started and closed:** these only count joins and leaves the bot actually saw. A call that was already going when the bot started has no starter, and a call whose last person's leave (or move away) wasn't seen has no closer.
+- **Prime time and heatmap:** the average number of people in voice in each weekday hour of the period (2-hour blocks on the heatmap). An hour only partly inside the period counts as at least 30 minutes, so a few seconds at the edge can't win prime time.
+- **Rankings:** totals, time together and records include everyone. Rankings by ratio or average (average session, night owl, calls started and closed) only include people with at least 3 sessions and 1 hour in voice during the period, so one long visit doesn't top the chart.
+- **Footer:** it says how many sessions in the period were estimated (on a `/stats user` card, only that person's), and it warns when the history doesn't reach back to the start of the period.
 
 ### ping
 
@@ -69,8 +99,12 @@ A message that is exactly `ping` gets the reply `pong`.
 | `/sound add name (attachment\|url)` | Saves a sound to the library. | **Create Expressions** |
 | `/sound rename sound name` | Renames a library sound. | **Create Expressions** for sounds you added, **Manage Expressions** for any sound |
 | `/sound delete sound` | Deletes a library sound. | **Create Expressions** for sounds you added, **Manage Expressions** for any sound |
+| `/stats server [days]` | Voice stats for the whole server, in pages. `days` is 1–365 (default 30). | Anyone |
+| `/stats user [user] [days]` | One person's voice stats card (default: you). | Anyone |
+| `/stats channel channel [days]` | Voice stats for one voice channel. | Anyone |
+| `/info` | Bot version, uptime, features and the stats cache status. | Anyone |
 
-All commands work only in servers. Permissions are checked when a command runs, and every reply is ephemeral (visible only to you). Commands are registered globally on startup, and Discord may take a few minutes to show new or changed commands.
+All commands work only in servers. Permissions are checked when a command runs, and every reply is ephemeral (visible only to you). `/stats` replies also have a **Share** button that posts them to the channel. Commands are registered globally on startup, and Discord may take a few minutes to show new or changed commands.
 
 ## Discord setup
 
@@ -88,8 +122,8 @@ All commands work only in servers. Permissions are checked when a command runs, 
 | Intent | Why |
 | --- | --- |
 | `Guilds` | Servers, channels and slash commands |
-| `GuildVoiceStates` | Finding the caller's voice channel and posting voice notices |
-| `GuildMessages` | Receiving `ping` messages |
+| `GuildVoiceStates` | Finding the caller's voice channel, posting voice notices and seeing who is in voice right now for `/stats` |
+| `GuildMessages` | Receiving `ping` messages, and message deletes (library sounds and voice notices deleted by hand) |
 | `MessageContent` (privileged) | Reading message content for `ping` |
 
 ### Bot permissions (`3263504`)
@@ -101,11 +135,11 @@ All commands work only in servers. Permissions are checked when a command runs, 
 | Send Messages | Library entries, the admin log, voice notices and `pong` |
 | Embed Links | Library and log messages |
 | Attach Files | Re-uploading saved sound files to the library |
-| Read Message History | Rebuilding the library index and fetching fresh attachment URLs |
+| Read Message History | Rebuilding the library index, fetching fresh attachment URLs and reading past voice notices for `/stats` |
 | Connect | Joining voice channels |
 | Speak | Playing audio |
 
-The bot also needs to be able to view and send in the server's system channel for voice notices.
+The bot also needs to be able to view and send in the server's system channel for voice notices. `/stats` reads that channel's history, so it also needs **View Channels** and **Read Message History** there. Both are already in `3263504`; only a channel permission overwrite that denies them to the bot gets in the way.
 
 ## Configuration
 
@@ -159,8 +193,9 @@ Source layout:
 | `src/playback/` | Source resolution (yt-dlp/ffmpeg), the pure queue state machine and the per-server player |
 | `src/library/` | Library message format, name validation and the Discord-backed store |
 | `src/guild/` | Channel discovery and creation, and the admin log |
-| `src/interactions/` | Slash commands, the button panel, the context menu, autocomplete and permission checks |
+| `src/interactions/` | Slash commands (including `/stats` and `/info`), the button panel, the context menu, autocomplete and permission checks |
 | `src/voice-activity/` | Voice join/leave/move notices and the Slack mirror |
+| `src/stats/` | Voice stats: parsing notices, rebuilding sessions, computing and rendering the stats, and the in-memory history cache |
 | `src/ping/` | The ping → pong reply |
 
 Unit tests are `*.test.ts` files that sit next to the code they test, run with [vitest](https://vitest.dev).
