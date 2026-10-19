@@ -7,9 +7,11 @@
  *
  * Lifecycle of a guild session:
  *   play() -> join (entersState Ready) -> enqueue -> openTrackInput -> AudioPlayer
- *   -> track ends / errors -> next item ... -> queue empty -> leave (destroy connection).
- * A session object is created per join and discarded on leave, so stale callbacks from
- * an old session are recognised by identity (`sessions.get(guildId) !== session`).
+ *   -> track ends / errors -> next item ... -> queue empty -> stay in the channel, idle
+ *   -> leave() / no people left in the channel / connection lost -> leave (destroy connection).
+ * Staying avoids Discord's join/leave sound around every play. A session object is created
+ * per join and discarded on leave, so stale callbacks from an old session are recognised by
+ * identity (`sessions.get(guildId) !== session`).
  */
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -32,6 +34,7 @@ import { VOLUME_DEFAULT, VOLUME_MAX, VOLUME_MIN } from '../constants.js';
 import { errorMessage, PlaybackError, type PlaybackErrorCode } from '../errors.js';
 import type {
   GuildPlaybackStatus,
+  LeaveResult,
   PlayerEventListener,
   PlayerEventName,
   PlayerEvents,
@@ -64,7 +67,7 @@ const RECOVER_TIMEOUT_MS = 20_000;
 const STOPPED_BEFORE_START_MESSAGE = 'Playback was stopped before it could start.';
 
 const BUSY_ELSEWHERE_MESSAGE =
-  "I'm already playing in another voice channel on this server. Join that channel, or wait until it finishes.";
+  "I'm already in another voice channel on this server. Join that channel, or ask someone there to use `/leave`.";
 
 /** Clamp a volume percent into [VOLUME_MIN, VOLUME_MAX]; NaN falls back to the default. */
 export function clampVolume(percent: number): number {
@@ -84,6 +87,25 @@ export function toTrackInfo(item: QueueItem): TrackInfo {
     playlistIndex: item.playlistIndex,
     playlistSize: item.playlistSize,
   };
+}
+
+/** The VoiceState fields hasPeople reads (a discord.js VoiceState satisfies it). */
+export interface PresenceState {
+  readonly id: string;
+  readonly channelId: string | null;
+  readonly member: { readonly user: { readonly bot: boolean } } | null;
+}
+
+/**
+ * True when at least one person (not a bot) other than `botId` is in `channelId`. A member
+ * missing from the cache counts as a person, so a stale cache can keep the bot in a channel
+ * but never makes it leave one that still has people in it.
+ */
+export function hasPeople(states: Iterable<PresenceState>, channelId: string, botId: string): boolean {
+  for (const state of states) {
+    if (state.channelId === channelId && state.id !== botId && state.member?.user.bot !== true) return true;
+  }
+  return false;
 }
 
 interface ResourceMeta {
@@ -116,10 +138,8 @@ interface Session {
   /** Aborts the pending join (teardown while still connecting). */
   readonly joinAbort: AbortController;
   isReady: boolean;
-  /** stop() was called (distinguishes "stopped while joining" from a failed join). */
-  stopRequested: boolean;
-  /** play() calls currently awaiting `ready` (the last one out releases an empty session). */
-  waiters: number;
+  /** Left because no people were left in the channel (distinguishes it from a failed join). */
+  emptied: boolean;
   /** Pending wait for a lost connection to become Ready again (aborted on teardown). */
   recovery: AbortController | null;
   queue: QueueState<QueueItem>;
@@ -252,8 +272,10 @@ class DiscordPlayerManager implements PlayerManager {
     if (stoppedSince()) return fail('join-failed', STOPPED_BEFORE_START_MESSAGE);
     if (resolved.length === 0) return fail('empty-playlist', 'Nothing playable was found.');
 
-    // 2. Re-check: the bot may have joined another channel while we were resolving.
+    // 2. Re-check: the bot may have joined another channel while we were resolving, and
+    // everyone may have left the target channel (don't join an empty channel).
     if (this.isBusyElsewhere(req.guildId, req.voiceChannelId)) return fail('busy-elsewhere', BUSY_ELSEWHERE_MESSAGE);
+    if (!this.channelHasPeople(req.guildId, req.voiceChannelId)) return fail('join-failed', STOPPED_BEFORE_START_MESSAGE);
 
     // 3. Join (or reuse) the requester's channel.
     let session: Session;
@@ -264,21 +286,17 @@ class DiscordPlayerManager implements PlayerManager {
       console.error('[player] unexpected join error:', err);
       return fail('join-failed', 'Could not join your voice channel.');
     }
-    session.waiters++;
     try {
       await session.ready;
     } catch {
-      if (session.stopRequested || stoppedSince()) return fail('join-failed', STOPPED_BEFORE_START_MESSAGE);
+      if (session.emptied || stoppedSince()) return fail('join-failed', STOPPED_BEFORE_START_MESSAGE);
       return fail('join-failed', 'Could not connect to your voice channel. Check that I can Connect and Speak there.');
-    } finally {
-      session.waiters--;
     }
     if (stoppedSince() || session.closed || this.sessions.get(req.guildId) !== session) {
       return fail('join-failed', STOPPED_BEFORE_START_MESSAGE);
     }
     if (session.channelId !== req.voiceChannelId) {
-      // Moved by an admin while joining. Leave if nothing else will use this session.
-      this.releaseIfEmpty(session);
+      // Moved by an admin while joining: the bot stays in the new channel (it left if that was empty).
       return fail('busy-elsewhere', BUSY_ELSEWHERE_MESSAGE);
     }
 
@@ -310,17 +328,31 @@ class DiscordPlayerManager implements PlayerManager {
   // -------------------------------------------------------------------------
 
   stop(guildId: string): StopResult | null {
-    // Always cancel plays that are still resolving, even when no session exists yet.
+    // Always cancel plays that are still resolving or joining, even when no session exists yet.
+    const loading = this.pendingTargets.has(guildId);
     this.cancelPending(guildId);
     const session = this.sessions.get(guildId);
     if (!session) return null;
     const stopped = session.queue.current ? toTrackInfo(session.queue.current) : null;
     const cleared = session.queue.upcoming.length;
-    session.stopRequested = true;
-    // stop() always leaves (also aborts a connection that is still joining).
+    if (!stopped && cleared === 0 && !loading) return null; // idle in the channel: nothing to stop
+    // The bot stays in the channel (also keeps joining); leave() disconnects.
     this.apply(session, stop(session.queue));
-    // A session existed and was torn down: report it even if nothing had started yet.
     return { stopped, cleared };
+  }
+
+  leave(guildId: string): LeaveResult | null {
+    // Always cancel plays that are still resolving, even when no session exists yet.
+    this.cancelPending(guildId);
+    const session = this.sessions.get(guildId);
+    if (!session) return null;
+    const result: LeaveResult = {
+      channelId: session.channelId,
+      stopped: session.queue.current ? toTrackInfo(session.queue.current) : null,
+      cleared: session.queue.upcoming.length,
+    };
+    this.teardown(session); // also aborts a connection that is still joining
+    return result;
   }
 
   skip(guildId: string): SkipResult | null {
@@ -353,9 +385,18 @@ class DiscordPlayerManager implements PlayerManager {
 
   handleVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): void {
     const botId = this.deps.client.user?.id;
-    if (!botId || newState.id !== botId) return;
+    if (!botId) return;
     const session = this.sessions.get(newState.guild.id);
     if (!session) return;
+
+    if (newState.id !== botId) {
+      // Someone left (or moved out of) the bot's channel: leave once no people are left.
+      // Also while still joining, so a play whose requester already left doesn't stay behind.
+      if (oldState.channelId === session.channelId && newState.channelId !== session.channelId) {
+        this.leaveIfEmpty(session);
+      }
+      return;
+    }
 
     if (newState.channelId === null) {
       // Disconnected by someone else. Only for a READY session in the channel that was left:
@@ -367,8 +408,10 @@ class DiscordPlayerManager implements PlayerManager {
       return;
     }
     if (newState.channelId !== session.channelId) {
-      // Moved by an admin: @discordjs/voice follows the move; keep playing there.
+      // Moved by an admin: @discordjs/voice follows the move; keep playing there, unless
+      // nobody is in the new channel.
       session.channelId = newState.channelId;
+      this.leaveIfEmpty(session);
     }
   }
 
@@ -406,14 +449,17 @@ class DiscordPlayerManager implements PlayerManager {
     else this.pendingTargets.delete(guildId);
   }
 
-  /**
-   * Leave a joined session that ended up with nothing to play (e.g. the play that created it
-   * bailed out after the join). Other plays still awaiting `ready` decrement `waiters` in
-   * order, so the last one out decides; any of them that enqueues keeps the session.
-   */
-  private releaseIfEmpty(session: Session): void {
-    if (session.closed || this.sessions.get(session.guildId) !== session) return;
-    if (session.waiters > 0 || session.active || session.queue.current || session.queue.upcoming.length > 0) return;
+  /** People (non-bots) in the channel, from the voice state cache. Unknown guild: true (nothing to decide on). */
+  private channelHasPeople(guildId: string, channelId: string): boolean {
+    const guild = this.deps.client.guilds.cache.get(guildId);
+    if (!guild) return true;
+    return hasPeople(guild.voiceStates.cache.values(), channelId, this.deps.client.user?.id ?? '');
+  }
+
+  /** Leave once no people are left in the session's channel (also stops what is playing). */
+  private leaveIfEmpty(session: Session): void {
+    if (session.closed || this.channelHasPeople(session.guildId, session.channelId)) return;
+    session.emptied = true;
     this.teardown(session);
   }
 
@@ -468,8 +514,7 @@ class DiscordPlayerManager implements PlayerManager {
       ready: Promise.resolve(),
       joinAbort: new AbortController(),
       isReady: false,
-      stopRequested: false,
-      waiters: 0,
+      emptied: false,
       recovery: null,
       queue: emptyQueue<QueueItem>(),
       active: null,
@@ -490,7 +535,7 @@ class DiscordPlayerManager implements PlayerManager {
         throw err;
       },
     );
-    // Avoid an unhandled rejection when nobody awaits (e.g. stop() during connecting).
+    // Avoid an unhandled rejection when nobody awaits (e.g. leave() during connecting).
     session.ready.catch(() => {});
     this.sessions.set(guildId, session);
 
@@ -592,7 +637,7 @@ class DiscordPlayerManager implements PlayerManager {
     });
   }
 
-  /** Execute a queue transition: stop the old track, start the new one, or leave. */
+  /** Execute a queue transition: stop the old track and start the new one. Idle stays in the channel. */
   private apply(session: Session, transition: QueueTransition<QueueItem>): void {
     if (session.closed) return;
     session.queue = transition.state;
@@ -609,11 +654,7 @@ class DiscordPlayerManager implements PlayerManager {
       }
     }
 
-    if (transition.start) {
-      this.start(session, transition.start);
-    } else if (transition.idle) {
-      this.teardown(session);
-    }
+    if (transition.start) this.start(session, transition.start);
   }
 
   private start(session: Session, item: QueueItem): void {
@@ -689,7 +730,7 @@ class DiscordPlayerManager implements PlayerManager {
         console.error('[player] connection destroy failed:', err);
       }
     }
-    this.emit('idle', { guildId: session.guildId, channelId: session.channelId });
+    this.emit('left', { guildId: session.guildId, channelId: session.channelId });
   }
 }
 

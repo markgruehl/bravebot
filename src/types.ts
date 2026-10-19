@@ -178,8 +178,13 @@ export interface StopResult {
 
 export interface SkipResult {
   readonly skipped: TrackInfo | null;
-  /** What starts next, or null if playback ended (bot leaves). */
+  /** What starts next, or null if playback ended (the bot stays in the channel). */
   readonly next: TrackInfo | null;
+}
+
+export interface LeaveResult extends StopResult {
+  /** Voice channel the bot left (or stopped joining). */
+  readonly channelId: string;
 }
 
 export interface VolumeResult {
@@ -202,8 +207,8 @@ export interface PlayerEvents {
       error: Error;
     },
   ];
-  /** Queue drained (or stopped / bot disconnected) and the bot left the voice channel. */
-  idle: [event: { guildId: string; channelId: string | null }];
+  /** The bot left the voice channel (/leave, nobody left in it, disconnected, or a failed join). */
+  left: [event: { guildId: string; channelId: string }];
 }
 
 export type PlayerEventName = keyof PlayerEvents;
@@ -217,18 +222,24 @@ export type PlayerEventListener<E extends PlayerEventName> = (...args: PlayerEve
  * - mode 'interrupt' replaces ONLY the current track; upcoming items remain.
  * - Playlists: the mode applies to the FIRST item; remaining items are APPENDED to the
  *   END of the upcoming queue.
- * - Leave the voice channel immediately when nothing is left to play.
+ * - Stay in the voice channel when nothing is left to play. Leave only on leave(), when no
+ *   people (non-bots) are left in the channel, or when the connection is lost.
  */
 export interface PlayerManager {
   /** Resolves once the source is resolved and enqueued (NOT when playback finishes). Never throws for expected failures. */
   play(request: PlayRequest): Promise<PlayResult>;
   /**
-   * Stop playback AND clear the queue; leaves the channel (also while still joining).
-   * Also cancels plays that are still resolving their source. Null only when the bot had
-   * no session in the guild (not connected / connecting).
+   * Stop playback AND clear the queue; the bot stays in the channel (also while still joining).
+   * Also cancels plays that are still resolving their source. Null when there was nothing to
+   * stop: no session in the guild, or an idle session with nothing playing, queued or loading.
    */
   stop(guildId: string): StopResult | null;
-  /** Skip to the next upcoming item; if none, ends playback (leaves). Null when nothing was playing. */
+  /**
+   * Stop playback, clear the queue and leave the channel (also while still joining). Also
+   * cancels plays that are still resolving their source. Null when the bot had no session.
+   */
+  leave(guildId: string): LeaveResult | null;
+  /** Skip to the next upcoming item; if none, ends playback (the bot stays). Null when nothing was playing. */
   skip(guildId: string): SkipResult | null;
   /** Change the live volume of the CURRENT track (percent, clamped 0-200). Null when nothing is playing. */
   setVolume(guildId: string, percent: number): VolumeResult | null;
@@ -245,7 +256,10 @@ export interface PlayerManager {
    * or failed). Lets /stop cancel it before the bot has joined any channel.
    */
   hasPendingPlay(guildId: string, channelId: string): boolean;
-  /** Bookkeeping for the bot's OWN voice state (forcibly disconnected / moved by an admin). Ignores other members. */
+  /**
+   * Voice state bookkeeping: the bot's OWN state (forcibly disconnected / moved by an admin),
+   * and everyone else's, to leave once no people are left in the bot's channel.
+   */
   handleVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): void;
   /** Tear down a guild (guildDelete). */
   destroyGuild(guildId: string): void;
@@ -392,6 +406,7 @@ export type FailureReason =
   | 'missing-permission' // lacks Use Soundboard / Create / Manage Expressions
   | 'not-in-bot-channel' // control command from someone not in the bot's voice channel
   | 'nothing-playing'
+  | 'not-connected' // /leave while the bot is not in a voice channel
   | 'busy-elsewhere'
   | 'bad-url'
   | 'bad-attachment'
@@ -426,6 +441,15 @@ export type AdminLogEvent =
       readonly type: 'stop';
       readonly user: UserRef;
       readonly voiceChannelId: string;
+      readonly stopped: TrackInfo | null;
+      readonly cleared: number;
+    })
+  | (LogEventBase & {
+      readonly type: 'leave';
+      readonly user: UserRef;
+      readonly voiceChannelId: string;
+      /** False when the bot had not joined yet and only a sound that was still loading was cancelled. */
+      readonly connected: boolean;
       readonly stopped: TrackInfo | null;
       readonly cleared: number;
     })

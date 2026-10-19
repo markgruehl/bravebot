@@ -25,7 +25,7 @@ export interface QueueTransition<T> {
   readonly start: T | null;
   /** The previous current item that must be stopped/abandoned, else null. */
   readonly stopped: T | null;
-  /** True when nothing is left to play (player should leave the channel). */
+  /** True when nothing is left to play (the player stays in the channel, idle). */
   readonly idle: boolean;
 }
 

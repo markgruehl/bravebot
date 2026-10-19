@@ -1,18 +1,19 @@
 /**
- * /stop, /skip, /volume (INTERACTIONS implementer). Allowed for anyone currently in the
- * bot's voice channel; no other permission. Each logs to the admin log.
+ * /stop, /skip, /volume, /leave (INTERACTIONS implementer). Allowed for anyone currently in
+ * the bot's voice channel; no other permission. Each logs to the admin log.
  *
  * These do not require the guild's library/channels to be ready: playback state lives
  * in the player manager, so stopping a sound always works.
  */
 import type { ChatInputCommandInteraction } from 'discord.js';
-import type { AdminLogEvent, BotContext, UserRef } from '../types.js';
+import type { AdminLogEvent, BotContext, FailureReason, UserRef } from '../types.js';
 import { OPTIONS } from './commands.js';
 import { canControlPlayback } from './permissions.js';
 import { deny, replyEphemeral, userRefOf } from './reply.js';
 import {
   MESSAGES,
   clampVolume,
+  formatLeaveReply,
   formatSkipReply,
   formatStopReply,
   formatVolumeReply,
@@ -24,19 +25,28 @@ interface ControlContext {
   readonly botChannelId: string;
 }
 
-/** Shared gate: something must be playing and the caller must be in the bot's channel. */
+interface Denial {
+  readonly message: string;
+  readonly reason: FailureReason;
+}
+
+const NOTHING_PLAYING: Denial = { message: MESSAGES.nothingPlaying, reason: 'nothing-playing' };
+const NOT_CONNECTED: Denial = { message: MESSAGES.notConnected, reason: 'not-connected' };
+
+/** Shared gate: the bot must be in a voice channel and the caller must be in that channel. */
 async function checkControl(
   ctx: BotContext,
   interaction: ChatInputCommandInteraction<'cached'>,
   action: string,
+  whenNotConnected: Denial = NOTHING_PLAYING,
 ): Promise<ControlContext | null> {
   const user = userRefOf(interaction);
   const userChannelId = interaction.member.voice.channelId;
   const botChannelId = ctx.players.currentChannelId(interaction.guildId);
 
   if (botChannelId === null) {
-    await deny(ctx, interaction, MESSAGES.nothingPlaying, {
-      reason: 'nothing-playing',
+    await deny(ctx, interaction, whenNotConnected.message, {
+      reason: whenNotConnected.reason,
       action,
       user,
       voiceChannelId: userChannelId,
@@ -79,23 +89,28 @@ function logEvent(ctx: BotContext, guildId: string, event: AdminLogEvent): void 
   ctx.adminLog.log(guildId, event).catch((err: unknown) => console.error('[controls] admin log failed:', err));
 }
 
+/**
+ * Not joined yet, but a play into the caller's channel is still loading (e.g. a playlist
+ * being resolved): only someone in that target channel may cancel it. Returns that channel.
+ */
+function loadingIntoCallersChannel(ctx: BotContext, interaction: ChatInputCommandInteraction<'cached'>): string | null {
+  const guildId = interaction.guildId;
+  const userChannelId = interaction.member.voice.channelId;
+  if (ctx.players.currentChannelId(guildId) !== null || userChannelId === null) return null;
+  return ctx.players.hasPendingPlay(guildId, userChannelId) ? userChannelId : null;
+}
+
 export async function handleStopCommand(ctx: BotContext, interaction: ChatInputCommandInteraction<'cached'>): Promise<void> {
   const action = '/stop';
   const guildId = interaction.guildId;
-  const userChannelId = interaction.member.voice.channelId;
-  // Not joined yet, but a play into the caller's channel is still loading (e.g. a playlist
-  // being resolved): only someone in that target channel may cancel it.
-  if (
-    ctx.players.currentChannelId(guildId) === null &&
-    userChannelId !== null &&
-    ctx.players.hasPendingPlay(guildId, userChannelId)
-  ) {
+  const loadingChannelId = loadingIntoCallersChannel(ctx, interaction);
+  if (loadingChannelId !== null) {
     ctx.players.stop(guildId); // null: no session yet, but pending resolves are cancelled
     logEvent(ctx, guildId, {
       type: 'stop',
       at: new Date(),
       user: userRefOf(interaction),
-      voiceChannelId: userChannelId,
+      voiceChannelId: loadingChannelId,
       stopped: null,
       cleared: 0,
     });
@@ -160,4 +175,49 @@ export async function handleVolumeCommand(ctx: BotContext, interaction: ChatInpu
     to: result.to,
   });
   await replyEphemeral(interaction, formatVolumeReply(result));
+}
+
+export async function handleLeaveCommand(ctx: BotContext, interaction: ChatInputCommandInteraction<'cached'>): Promise<void> {
+  const action = '/leave';
+  const guildId = interaction.guildId;
+  const loadingChannelId = loadingIntoCallersChannel(ctx, interaction);
+  if (loadingChannelId !== null) {
+    ctx.players.leave(guildId); // null: no session yet, but pending resolves are cancelled
+    logEvent(ctx, guildId, {
+      type: 'leave',
+      at: new Date(),
+      user: userRefOf(interaction),
+      voiceChannelId: loadingChannelId,
+      connected: false,
+      stopped: null,
+      cleared: 0,
+    });
+    await replyEphemeral(interaction, MESSAGES.cancelledLoading);
+    return;
+  }
+  const control = await checkControl(ctx, interaction, action, NOT_CONNECTED);
+  if (!control) return;
+  const result = ctx.players.leave(guildId);
+  if (!result) {
+    // Left on its own (e.g. disconnected) since the check above.
+    await deny(ctx, interaction, MESSAGES.notConnected, {
+      reason: 'not-connected',
+      action,
+      user: control.user,
+      voiceChannelId: control.botChannelId,
+      source: null,
+      detail: null,
+    });
+    return;
+  }
+  logEvent(ctx, guildId, {
+    type: 'leave',
+    at: new Date(),
+    user: control.user,
+    voiceChannelId: result.channelId,
+    connected: true,
+    stopped: result.stopped,
+    cleared: result.cleared,
+  });
+  await replyEphemeral(interaction, formatLeaveReply(result));
 }

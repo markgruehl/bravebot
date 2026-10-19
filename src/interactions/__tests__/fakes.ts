@@ -74,6 +74,7 @@ export function makeCtx(opts: { ready?: boolean; library?: LibraryStore; botChan
   const playersMock = {
     play: vi.fn(),
     stop: vi.fn(),
+    leave: vi.fn(),
     skip: vi.fn(),
     setVolume: vi.fn(),
     getStatus: vi.fn(),

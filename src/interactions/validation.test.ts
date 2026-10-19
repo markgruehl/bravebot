@@ -9,6 +9,7 @@ import {
   describeLibraryError,
   firstAudioAttachment,
   formatPlaySuccess,
+  formatLeaveReply,
   formatSkipReply,
   formatStopReply,
   formatVolumeReply,
@@ -251,16 +252,23 @@ describe('formatting', () => {
   it('formats stop/skip/volume', () => {
     expect(formatStopReply({ stopped: track('A'), cleared: 2 })).toBe('Stopped **A** and cleared 2 queued items.');
     expect(formatStopReply({ stopped: null, cleared: 1 })).toBe('Stopped playback and cleared 1 queued item.');
-    expect(formatStopReply({ stopped: null, cleared: 0 })).toBe('Stopped playback (nothing had started playing yet).');
+    expect(formatStopReply({ stopped: null, cleared: 0 })).toBe('Cancelled the sound that was still loading.');
     expect(formatSkipReply({ skipped: track('A'), next: track('B') })).toBe('Skipped **A**. Now playing **B**.');
-    expect(formatSkipReply({ skipped: track('A'), next: null })).toContain('Nothing left in the queue');
+    expect(formatSkipReply({ skipped: track('A'), next: null })).toBe('Skipped **A**. Nothing left in the queue.');
     expect(formatVolumeReply({ track: track('A'), from: 100, to: 50 })).toBe(
       'Volume for **A** changed from 100% to 50%.',
     );
   });
-  it('busy-elsewhere message names the channel when known', () => {
+  it('formats leave', () => {
+    expect(formatLeaveReply({ channelId: 'vc', stopped: null, cleared: 0 })).toBe('Left <#vc>.');
+    expect(formatLeaveReply({ channelId: 'vc', stopped: track('A'), cleared: 2 })).toBe(
+      'Left <#vc>. Stopped **A** and cleared 2 queued items.',
+    );
+  });
+  it('busy-elsewhere message names the channel when known and points to /leave', () => {
     expect(busyElsewhereMessage('vc9')).toContain('<#vc9>');
     expect(busyElsewhereMessage(null)).not.toContain('<#');
+    for (const id of ['vc9', null]) expect(busyElsewhereMessage(id)).toContain('`/leave`');
   });
   it('truncate', () => {
     expect(truncate('abc', 5)).toBe('abc');

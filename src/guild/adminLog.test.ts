@@ -114,6 +114,18 @@ describe('formatAdminLogEvent', () => {
       'cleared 1 queued item',
     );
 
+    const leave = formatAdminLogEvent({ type: 'leave', at, user, voiceChannelId: VC, connected: true, stopped: track(), cleared: 1 });
+    expect(leave).toContain('**Leave**');
+    expect(leave).toContain(`left <#${VC}>`);
+    expect(leave).toContain('Never Gonna Give You Up');
+    expect(leave).toContain('cleared 1 queued item');
+    expect(
+      formatAdminLogEvent({ type: 'leave', at, user, voiceChannelId: VC, connected: true, stopped: null, cleared: 0 }),
+    ).toContain('nothing was playing');
+    expect(
+      formatAdminLogEvent({ type: 'leave', at, user, voiceChannelId: VC, connected: false, stopped: null, cleared: 0 }),
+    ).toContain('cancelled a sound that was still loading before the bot joined');
+
     const skip = formatAdminLogEvent({
       type: 'skip',
       at,

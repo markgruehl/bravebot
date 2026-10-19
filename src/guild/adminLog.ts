@@ -29,6 +29,7 @@ const FAILURE_LABELS: Record<FailureReason, string> = {
   'missing-permission': 'missing permission',
   'not-in-bot-channel': "not in the bot's voice channel",
   'nothing-playing': 'nothing playing',
+  'not-connected': 'bot not in a voice channel',
   'busy-elsewhere': 'bot busy in another voice channel',
   'bad-url': 'bad URL',
   'bad-attachment': 'bad attachment',
@@ -106,6 +107,10 @@ function describeSound(sound: LibrarySound): string {
   return `**${text(sound.name)}** (${what}, added by <@${sound.addedBy}>)`;
 }
 
+function cleared(count: number): string {
+  return `cleared ${count} queued item${count === 1 ? '' : 's'}`;
+}
+
 function body(event: AdminLogEvent): string {
   switch (event.type) {
     case 'play': {
@@ -121,7 +126,14 @@ function body(event: AdminLogEvent): string {
         : event.cleared === 0
           ? 'cancelled before anything started playing'
           : 'nothing was playing';
-      return `⏹️ **Stop** · ${user(event.user)} in ${voice(event.voiceChannelId)} · ${stopped} · cleared ${event.cleared} queued item${event.cleared === 1 ? '' : 's'}`;
+      return `⏹️ **Stop** · ${user(event.user)} in ${voice(event.voiceChannelId)} · ${stopped} · ${cleared(event.cleared)}`;
+    }
+    case 'leave': {
+      if (!event.connected) {
+        return `🚪 **Leave** · ${user(event.user)} in ${voice(event.voiceChannelId)} · cancelled a sound that was still loading before the bot joined`;
+      }
+      const stopped = event.stopped ? `stopped ${describeTrack(event.stopped)}` : 'nothing was playing';
+      return `🚪 **Leave** · ${user(event.user)} · left ${voice(event.voiceChannelId)} · ${stopped} · ${cleared(event.cleared)}`;
     }
     case 'skip': {
       const skipped = event.skipped ? `skipped ${describeTrack(event.skipped)}` : 'nothing was playing';
