@@ -67,7 +67,7 @@ export function buildInfoEmbed(input: InfoInput): APIEmbed {
       {
         name: 'Features',
         value: [
-          '**Soundboard:** `/play`, `/soundboard`, `/sound`',
+          '**Soundboard:** `/play`, `/soundboard`, `/sound`, plus `/stop`, `/skip`, `/volume` and `/leave`',
           '**Voice activity notices** in the system channel',
           '**Voice stats:** `/stats server`, `/stats user`, `/stats channel`',
           '**Ping:** say `ping`, get `pong`',

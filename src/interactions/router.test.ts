@@ -40,6 +40,15 @@ describe('handleInteraction routing', () => {
     expect(handleInfoCommand).toHaveBeenCalledWith(ctx, info);
   });
 
+  it('routes /leave', async () => {
+    const ctx = makeCtx({ botChannelId: 'vc-1' });
+    ctx.playersMock.leave.mockReturnValue({ channelId: 'vc-1', stopped: null, cleared: 0 });
+    const leave = makeInteraction({ commandName: 'leave' });
+    await handleInteraction(ctx, leave as never);
+    expect(ctx.playersMock.leave).toHaveBeenCalledWith('guild-1');
+    expect(leave.replies[0]?.content).toBe('Left <#vc-1>.');
+  });
+
   it('routes stats buttons to the stats handler and sb: buttons to the panel', async () => {
     const ctx = makeCtx();
     const stats = makeButtonInteraction({ customId: statsId });

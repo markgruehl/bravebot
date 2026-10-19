@@ -17,10 +17,16 @@ The bot is **stateless**. It keeps nothing on local disk and uses no database. A
 - **Stage channels are not supported** (the bot would join as a muted listener). Use a regular voice channel.
 - Links to private or local addresses (localhost, LAN, link-local and similar) are rejected.
 - **Volume:** 0–200% (default 100%). Set it per play, or change the current track live with `/volume`.
-- **One channel per server.** If the bot is already busy in a different voice channel of the server, the request is rejected.
-- The bot **leaves the voice channel as soon as nothing is left to play.**
+- **One channel per server.** If the bot is already in a different voice channel of the server, playing or not, the request is rejected. Join that channel, or ask someone there to use `/leave`.
+- **The bot stays in the voice channel** after a sound ends, so Discord's join and leave sounds don't play around every sound. `/stop` and `/skip` don't make it leave. It leaves right away, even in the middle of a sound, when:
+  - no people are left in its channel (other bots don't count),
+  - someone uses `/leave`,
+  - an admin moves it into an empty channel, or
+  - it is disconnected.
+
+  There is no idle timeout. If everyone leaves while a sound is still loading, the bot doesn't join. After a restart the bot isn't in any channel until the next sound.
 - There is no length limit.
-- `/stop` also cancels a sound that is still loading (for example a large playlist that is still being read).
+- `/stop` and `/leave` also cancel a sound that is still loading (for example a large playlist that is still being read).
 
 ### Sound library
 
@@ -36,7 +42,7 @@ The bot is **stateless**. It keeps nothing on local disk and uses no database. A
 The private channel `#soundboard-log` records:
 
 - every play: who, what, when, which voice channel, interrupt or queue, volume and playlist item count
-- stop, skip and volume actions
+- stop, skip, volume and leave actions (the bot leaving on its own because nobody is left in its channel is not logged)
 - library adds, renames and deletes
 - failures and denials, such as not being in voice, a missing permission, the bot being busy elsewhere, a bad URL, an extraction or playback error, or voice stats that could not be read (viewing stats is not logged)
 
@@ -93,9 +99,10 @@ A message that is exactly `ping` gets the reply `pong`.
 | `/play` | Play exactly one of `attachment`, `url` or `sound` (autocomplete). Optional `mode` (`interrupt`\|`queue`) and `volume` (0–200). | **Use Soundboard** in your voice channel |
 | `/soundboard` | Shows a private, paginated button panel of library sounds. Clicking a button plays that sound. | **Use Soundboard** in your voice channel |
 | Message menu → **Apps → Play in my voice channel** | Plays the first audio attachment of a message. | **Use Soundboard** in your voice channel |
-| `/stop` | Stops playback and clears the queue. | Anyone in the bot's voice channel |
-| `/skip` | Skips to the next queued item, or ends playback if the queue is empty. | Anyone in the bot's voice channel |
+| `/stop` | Stops playback and clears the queue. The bot stays in the channel. | Anyone in the bot's voice channel |
+| `/skip` | Skips to the next queued item, or ends the current one if the queue is empty. The bot stays in the channel. | Anyone in the bot's voice channel |
 | `/volume level` | Changes the volume (0–200) of the current track. | Anyone in the bot's voice channel |
+| `/leave` | Stops playback, clears the queue and makes the bot leave the voice channel. | Anyone in the bot's voice channel |
 | `/sound add name (attachment\|url)` | Saves a sound to the library. | **Create Expressions** |
 | `/sound rename sound name` | Renames a library sound. | **Create Expressions** for sounds you added, **Manage Expressions** for any sound |
 | `/sound delete sound` | Deletes a library sound. | **Create Expressions** for sounds you added, **Manage Expressions** for any sound |
@@ -122,7 +129,7 @@ All commands work only in servers. Permissions are checked when a command runs, 
 | Intent | Why |
 | --- | --- |
 | `Guilds` | Servers, channels and slash commands |
-| `GuildVoiceStates` | Finding the caller's voice channel, posting voice notices and seeing who is in voice right now for `/stats` |
+| `GuildVoiceStates` | Finding the caller's voice channel, leaving once nobody is left in the bot's channel, posting voice notices and seeing who is in voice right now for `/stats` |
 | `GuildMessages` | Receiving `ping` messages, and message deletes (library sounds and voice notices deleted by hand) |
 | `MessageContent` (privileged) | Reading message content for `ping` |
 

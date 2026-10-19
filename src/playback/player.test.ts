@@ -76,13 +76,14 @@ vi.mock('./sources.js', () => ({
 
 const { joinVoiceChannel } = await import('@discordjs/voice');
 const sources = await import('./sources.js');
-const { createPlayerManager } = await import('./player.js');
+const { createPlayerManager, hasPeople } = await import('./player.js');
 
 const resolveSource = vi.mocked(sources.resolveSource);
 const openTrackInput = vi.mocked(sources.openTrackInput);
 
 const GUILD = 'g1';
 const BOT = 'bot';
+const STOPPED = 'Playback was stopped before it could start.';
 const track = (title: string): ResolvedTrack => ({ title, input: { kind: 'direct', url: `https://x.test/${title}.mp3` }, durationSec: null });
 
 function deferred<T>() {
@@ -95,11 +96,25 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+interface Presence {
+  id: string;
+  channelId: string | null;
+  member: { user: { bot: boolean } } | null;
+}
+
+/** The fake guild's voice state cache (who is in which channel), reset before each test. */
+const presence = new Map<string, Presence>();
+
+function setPresence(id: string, channelId: string | null, bot = false) {
+  presence.set(id, { id, channelId, member: { user: { bot } } });
+}
+
 function makeManager() {
   const guild = {
     id: GUILD,
     channels: { cache: new Map() },
     members: { me: null },
+    voiceStates: { cache: presence },
     voiceAdapterCreator: () => ({}),
   };
   const client = { user: { id: BOT }, guilds: { cache: new Map([[GUILD, guild]]) } };
@@ -117,8 +132,30 @@ const request = (over: Partial<PlayRequest> = {}): PlayRequest => ({
   ...over,
 });
 
+function voiceState(id: string, channelId: string | null): VoiceState {
+  return { id, channelId, guild: { id: GUILD } } as unknown as VoiceState;
+}
+
 function botVoiceState(channelId: string | null): VoiceState {
-  return { id: BOT, channelId, guild: { id: GUILD } } as unknown as VoiceState;
+  return voiceState(BOT, channelId);
+}
+
+/** Move a person (updating the cache first, as discord.js does) and deliver the update. */
+function movePerson(players: ReturnType<typeof makeManager>, id: string, to: string | null) {
+  const from = presence.get(id)?.channelId ?? null;
+  setPresence(id, to);
+  players.handleVoiceStateUpdate(voiceState(id, from), voiceState(id, to));
+}
+
+/** A manager whose bot has joined vc1 and is playing (loading) `titles` in order. */
+async function playing(...titles: string[]) {
+  const players = makeManager();
+  resolveSource.mockResolvedValueOnce(titles.map(track));
+  const play = players.play(request());
+  await tick();
+  lastConnection().makeReady();
+  await expect(play).resolves.toMatchObject({ ok: true });
+  return { players, conn: lastConnection() };
 }
 
 const lastConnection = () => voice.connections.at(-1) as FakeConnection;
@@ -126,6 +163,9 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 beforeEach(() => {
   voice.connections.length = 0;
+  presence.clear();
+  setPresence('u1', 'vc1');
+  setPresence('u2', 'vc2');
   vi.spyOn(console, 'error').mockImplementation(() => {});
   // Default: a pipeline that never produces audio (stays "loading").
   openTrackInput.mockImplementation(() => new Promise(() => {}));
@@ -151,7 +191,7 @@ describe('stop() vs in-flight plays', () => {
     expect(signal.aborted).toBe(true); // yt-dlp would be killed
 
     pending.resolve([track('a')]);
-    await expect(play).resolves.toMatchObject({ ok: false, message: 'Playback was stopped before it could start.' });
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
     expect(joinVoiceChannel).not.toHaveBeenCalled();
     expect(players.currentChannelId(GUILD)).toBeNull();
   });
@@ -166,7 +206,7 @@ describe('stop() vs in-flight plays', () => {
     await expect(play).resolves.toMatchObject({ ok: true, startedNow: true });
   });
 
-  it('returns a non-null result when stopping a session that is still joining', async () => {
+  it('stops a play whose session is still joining; the bot finishes joining and stays', async () => {
     const players = makeManager();
     resolveSource.mockResolvedValueOnce([track('a')]);
     const play = players.play(request());
@@ -174,8 +214,180 @@ describe('stop() vs in-flight plays', () => {
     expect(players.currentChannelId(GUILD)).toBe('vc1');
 
     expect(players.stop(GUILD)).toEqual({ stopped: null, cleared: 0 });
-    await expect(play).resolves.toMatchObject({ ok: false, message: 'Playback was stopped before it could start.' });
+    lastConnection().makeReady();
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
+    expect(players.getStatus(GUILD)).toMatchObject({ channelId: 'vc1', state: 'idle', current: null });
+    expect(lastConnection().destroy).not.toHaveBeenCalled();
+  });
+});
+
+describe('staying in the channel', () => {
+  it('stays when the queue runs out', async () => {
+    const left = vi.fn();
+    openTrackInput.mockRejectedValueOnce(new Error('ffmpeg exploded'));
+    const { players, conn } = await playing('a');
+    players.on('left', left);
+    await tick();
+    expect(players.getStatus(GUILD)).toMatchObject({ channelId: 'vc1', state: 'idle', current: null });
+    expect(conn.destroy).not.toHaveBeenCalled();
+    expect(left).not.toHaveBeenCalled();
+  });
+
+  it('stays when the last track is skipped', async () => {
+    const { players, conn } = await playing('a');
+    expect(players.skip(GUILD)).toMatchObject({ skipped: { title: 'a' }, next: null });
+    expect(players.getStatus(GUILD)).toMatchObject({ channelId: 'vc1', state: 'idle' });
+    expect(conn.destroy).not.toHaveBeenCalled();
+  });
+
+  it('stop() clears the queue but keeps the connection, and has nothing to stop once idle', async () => {
+    const { players, conn } = await playing('a', 'b');
+    expect(players.stop(GUILD)).toMatchObject({ stopped: { title: 'a' }, cleared: 1 });
+    expect(players.getStatus(GUILD)).toMatchObject({ channelId: 'vc1', state: 'idle', upcoming: [] });
+    expect(players.stop(GUILD)).toBeNull();
+    expect(conn.destroy).not.toHaveBeenCalled();
+  });
+
+  it('stop() on an idle bot cancels a play still resolving into its channel', async () => {
+    const { players } = await playing('a');
+    players.stop(GUILD);
+    const pending = deferred<ResolvedTrack[]>();
+    resolveSource.mockReturnValueOnce(pending.promise);
+    const play = players.play(request());
+    await tick();
+    expect(players.stop(GUILD)).toEqual({ stopped: null, cleared: 0 });
+    pending.resolve([track('b')]);
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
+    expect(players.currentChannelId(GUILD)).toBe('vc1');
+  });
+
+  it('plays the next sound on the same connection (no rejoin)', async () => {
+    const { players } = await playing('a');
+    players.stop(GUILD);
+    resolveSource.mockResolvedValueOnce([track('b')]);
+    await expect(players.play(request())).resolves.toMatchObject({ ok: true, startedNow: true });
+    expect(joinVoiceChannel).toHaveBeenCalledTimes(1);
+  });
+
+  it('leave() stops, clears and disconnects', async () => {
+    const left = vi.fn();
+    const { players, conn } = await playing('a', 'b');
+    players.on('left', left);
+    const loading = openTrackInput.mock.calls[0]![2]!;
+    expect(players.leave(GUILD)).toMatchObject({ channelId: 'vc1', stopped: { title: 'a' }, cleared: 1 });
+    expect(loading.aborted).toBe(true);
+    expect(conn.destroy).toHaveBeenCalled();
     expect(players.currentChannelId(GUILD)).toBeNull();
+    expect(left).toHaveBeenCalledWith({ guildId: GUILD, channelId: 'vc1' });
+    expect(players.leave(GUILD)).toBeNull();
+  });
+
+  it('leave() during resolve cancels the play without joining', async () => {
+    const players = makeManager();
+    const pending = deferred<ResolvedTrack[]>();
+    resolveSource.mockReturnValueOnce(pending.promise);
+    const play = players.play(request());
+    await tick();
+    expect(players.leave(GUILD)).toBeNull();
+    pending.resolve([track('a')]);
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
+    expect(joinVoiceChannel).not.toHaveBeenCalled();
+  });
+
+  it('leave() while joining aborts the join', async () => {
+    const players = makeManager();
+    resolveSource.mockResolvedValueOnce([track('a')]);
+    const play = players.play(request());
+    await tick();
+    expect(players.leave(GUILD)).toEqual({ channelId: 'vc1', stopped: null, cleared: 0 });
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
+    expect(lastConnection().destroy).toHaveBeenCalled();
+    expect(players.currentChannelId(GUILD)).toBeNull();
+  });
+});
+
+describe('leaving when nobody is left', () => {
+  it('leaves when the last person leaves, cutting off what is playing', async () => {
+    const left = vi.fn();
+    const { players, conn } = await playing('a', 'b');
+    players.on('left', left);
+    const loading = openTrackInput.mock.calls[0]![2]!;
+    movePerson(players, 'u1', null);
+    expect(loading.aborted).toBe(true);
+    expect(conn.destroy).toHaveBeenCalled();
+    expect(players.currentChannelId(GUILD)).toBeNull();
+    expect(left).toHaveBeenCalledWith({ guildId: GUILD, channelId: 'vc1' });
+  });
+
+  it('stays while someone is still in the channel, and leaves when the last one moves away', async () => {
+    setPresence('u3', 'vc1');
+    const { players, conn } = await playing('a');
+    movePerson(players, 'u1', null);
+    expect(players.currentChannelId(GUILD)).toBe('vc1');
+    movePerson(players, 'u3', 'vc2');
+    expect(conn.destroy).toHaveBeenCalled();
+    expect(players.currentChannelId(GUILD)).toBeNull();
+  });
+
+  it('does not count other bots as people', async () => {
+    setPresence('other-bot', 'vc1', true);
+    const { players } = await playing('a');
+    movePerson(players, 'u1', null);
+    expect(players.currentChannelId(GUILD)).toBeNull();
+  });
+
+  it('ignores people leaving other channels', async () => {
+    const { players, conn } = await playing('a');
+    movePerson(players, 'u2', null);
+    movePerson(players, 'u4', 'vc2');
+    expect(players.currentChannelId(GUILD)).toBe('vc1');
+    expect(conn.destroy).not.toHaveBeenCalled();
+  });
+
+  it('leaves when the requester leaves while the bot is still joining', async () => {
+    const players = makeManager();
+    resolveSource.mockResolvedValueOnce([track('a')]);
+    const play = players.play(request());
+    await tick();
+    movePerson(players, 'u1', 'vc2');
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
+    expect(lastConnection().destroy).toHaveBeenCalled();
+    expect(players.currentChannelId(GUILD)).toBeNull();
+  });
+
+  it('does not join a channel that emptied while the source was resolving', async () => {
+    const players = makeManager();
+    const pending = deferred<ResolvedTrack[]>();
+    resolveSource.mockReturnValueOnce(pending.promise);
+    const play = players.play(request());
+    await tick();
+    setPresence('u1', null); // no session yet, so the update itself is ignored
+    pending.resolve([track('a')]);
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
+    expect(joinVoiceChannel).not.toHaveBeenCalled();
+  });
+});
+
+describe('hasPeople', () => {
+  const state = (id: string, channelId: string | null, bot: boolean | null = false) => ({
+    id,
+    channelId,
+    member: bot === null ? null : { user: { bot } },
+  });
+
+  it('is true for a person in the channel', () => {
+    expect(hasPeople([state('u1', 'vc1')], 'vc1', BOT)).toBe(true);
+  });
+
+  it('ignores other channels, bots and the bot itself', () => {
+    expect(hasPeople([], 'vc1', BOT)).toBe(false);
+    expect(hasPeople([state('u1', 'vc2'), state('u2', null)], 'vc1', BOT)).toBe(false);
+    expect(hasPeople([state('b1', 'vc1', true)], 'vc1', BOT)).toBe(false);
+    expect(hasPeople([state(BOT, 'vc1', null)], 'vc1', BOT)).toBe(false);
+  });
+
+  it('counts a member missing from the cache as a person', () => {
+    expect(hasPeople([state('u1', 'vc1', null)], 'vc1', BOT)).toBe(true);
   });
 });
 
@@ -189,7 +401,7 @@ describe('handleVoiceStateUpdate', () => {
     await tick();
     lastConnection().makeReady();
     await first;
-    players.stop(GUILD);
+    players.leave(GUILD);
 
     // Session 2 starts joining the same channel before the leave's voice-state update arrives.
     resolveSource.mockResolvedValueOnce([track('b')]);
@@ -277,19 +489,30 @@ describe('pending plays', () => {
 });
 
 describe('moved by an admin while joining', () => {
-  it('leaves when the only play bails out because the bot was moved', async () => {
+  it('stays in the new channel when it has people (the play bails out)', async () => {
     const players = makeManager();
-    const idle = vi.fn();
-    players.on('idle', idle);
     resolveSource.mockResolvedValueOnce([track('a')]);
     const play = players.play(request());
     await tick();
     players.handleVoiceStateUpdate(botVoiceState('vc1'), botVoiceState('vc2'));
     lastConnection().makeReady();
     await expect(play).resolves.toMatchObject({ ok: false, code: 'busy-elsewhere' });
+    expect(players.currentChannelId(GUILD)).toBe('vc2');
+    expect(lastConnection().destroy).not.toHaveBeenCalled();
+  });
+
+  it('leaves when moved into an empty channel', async () => {
+    const players = makeManager();
+    const left = vi.fn();
+    players.on('left', left);
+    resolveSource.mockResolvedValueOnce([track('a')]);
+    const play = players.play(request());
+    await tick();
+    players.handleVoiceStateUpdate(botVoiceState('vc1'), botVoiceState('vc3'));
+    await expect(play).resolves.toMatchObject({ ok: false, message: STOPPED });
     expect(players.currentChannelId(GUILD)).toBeNull();
     expect(lastConnection().destroy).toHaveBeenCalled();
-    expect(idle).toHaveBeenCalledTimes(1);
+    expect(left).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the session when another waiting play targets the new channel', async () => {

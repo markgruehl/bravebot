@@ -34,6 +34,7 @@ export const COMMANDS = {
   stop: 'stop',
   skip: 'skip',
   volume: 'volume',
+  leave: 'leave',
   sound: 'sound',
   stats: 'stats',
   info: 'info',
@@ -110,7 +111,7 @@ export function buildCommandDefinitions(): RESTPostAPIApplicationCommandsJSONBod
 
   const stop = guildOnly(new SlashCommandBuilder())
     .setName(COMMANDS.stop)
-    .setDescription('Stop playback and clear the queue');
+    .setDescription('Stop playback and clear the queue (I stay in the channel)');
 
   const skip = guildOnly(new SlashCommandBuilder())
     .setName(COMMANDS.skip)
@@ -127,6 +128,10 @@ export function buildCommandDefinitions(): RESTPostAPIApplicationCommandsJSONBod
         .setMaxValue(VOLUME_MAX)
         .setRequired(true),
     );
+
+  const leave = guildOnly(new SlashCommandBuilder())
+    .setName(COMMANDS.leave)
+    .setDescription('Stop playback, clear the queue and make me leave the voice channel');
 
   const sound = guildOnly(new SlashCommandBuilder())
     .setName(COMMANDS.sound)
@@ -214,6 +219,7 @@ export function buildCommandDefinitions(): RESTPostAPIApplicationCommandsJSONBod
     stop.toJSON(),
     skip.toJSON(),
     volume.toJSON(),
+    leave.toJSON(),
     sound.toJSON(),
     stats.toJSON(),
     info.toJSON(),

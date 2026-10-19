@@ -9,6 +9,7 @@ import type { LibraryErrorCode, PlaybackErrorCode } from '../errors.js';
 import type {
   AudioSource,
   FailureReason,
+  LeaveResult,
   LibrarySound,
   LibraryStore,
   PlayEntryPoint,
@@ -32,6 +33,7 @@ export const MESSAGES = {
   missingUseSoundboard: 'You need the **Use Soundboard** permission in your voice channel to play sounds.',
   missingCreateExpressions: 'You need the **Create Expressions** permission to add sounds.',
   nothingPlaying: 'Nothing is playing right now.',
+  notConnected: "I'm not in a voice channel.",
   cancelledLoading: 'Cancelled the sound that was still loading.',
   notAudioAttachment: 'That attachment does not look like an audio file.',
   noAudioInMessage: 'That message has no audio attachment to play.',
@@ -191,8 +193,8 @@ export function describeLibraryError(error: { readonly code: LibraryErrorCode; r
 
 export function busyElsewhereMessage(botChannelId: string | null): string {
   return botChannelId
-    ? `I'm already busy in <#${botChannelId}>. Join that channel, or wait until it finishes.`
-    : `I'm already busy in another voice channel. Wait until it finishes.`;
+    ? `I'm in <#${botChannelId}>. Join that channel, or ask someone there to use \`/leave\`.`
+    : `I'm already in another voice channel. Ask someone there to use \`/leave\`.`;
 }
 
 export function notInBotChannelMessage(botChannelId: string): string {
@@ -219,9 +221,7 @@ export function formatPlaySuccess(
 }
 
 export function formatStopReply(result: StopResult): string {
-  if (result.stopped === null && result.cleared === 0) {
-    return 'Stopped playback (nothing had started playing yet).';
-  }
+  if (result.stopped === null && result.cleared === 0) return MESSAGES.cancelledLoading;
   const what = result.stopped ? `Stopped ${bold(result.stopped.title)}` : 'Stopped playback';
   const cleared = result.cleared === 1 ? '1 queued item' : `${result.cleared} queued items`;
   return truncate(`${what} and cleared ${cleared}.`);
@@ -229,8 +229,13 @@ export function formatStopReply(result: StopResult): string {
 
 export function formatSkipReply(result: SkipResult): string {
   const what = result.skipped ? `Skipped ${bold(result.skipped.title)}.` : 'Skipped.';
-  const next = result.next ? ` Now playing ${bold(result.next.title)}.` : ' Nothing left in the queue, so I left the channel.';
+  const next = result.next ? ` Now playing ${bold(result.next.title)}.` : ' Nothing left in the queue.';
   return truncate(what + next);
+}
+
+export function formatLeaveReply(result: LeaveResult): string {
+  const left = `Left <#${result.channelId}>.`;
+  return result.stopped === null && result.cleared === 0 ? left : truncate(`${left} ${formatStopReply(result)}`);
 }
 
 export function formatVolumeReply(result: VolumeResult): string {

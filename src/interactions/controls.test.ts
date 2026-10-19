@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TrackInfo } from '../types.js';
 import { flush, makeCtx, makeInteraction } from './__tests__/fakes.js';
-import { handleSkipCommand, handleStopCommand, handleVolumeCommand } from './controls.js';
+import { handleLeaveCommand, handleSkipCommand, handleStopCommand, handleVolumeCommand } from './controls.js';
 
 const track = (title: string): TrackInfo => ({
   id: title,
@@ -96,6 +96,16 @@ describe('playback controls', () => {
     expect(ctx.logged[0]).toMatchObject({ type: 'stop', voiceChannelId: 'vc-1', stopped: null, cleared: 0 });
   });
 
+  it('/stop on an idle bot with nothing loading denies with nothing-playing', async () => {
+    const ctx = makeCtx({ botChannelId: 'vc-1' });
+    ctx.playersMock.stop.mockReturnValue(null);
+    const i = makeInteraction();
+    await handleStopCommand(ctx, i as never);
+    await flush();
+    expect(i.replies[0]?.content).toBe('Nothing is playing right now.');
+    expect(ctx.logged[0]).toMatchObject({ type: 'failure', reason: 'nothing-playing', action: '/stop' });
+  });
+
   it('/stop does not cancel a loading play targeting another channel', async () => {
     const ctx = makeCtx({ botChannelId: null });
     ctx.playersMock.hasPendingPlay.mockImplementation((_g: string, ch: string) => ch === 'vc-other');
@@ -105,5 +115,65 @@ describe('playback controls', () => {
       expect(i.replies[0]?.content).toBe('Nothing is playing right now.');
     }
     expect(ctx.playersMock.stop).not.toHaveBeenCalled();
+  });
+});
+
+describe('/leave', () => {
+  it('leaves for anyone in the bot channel (no permissions needed) and logs', async () => {
+    const ctx = makeCtx({ botChannelId: 'vc-1' });
+    ctx.playersMock.leave.mockReturnValue({ channelId: 'vc-1', stopped: track('A'), cleared: 2 });
+    const i = makeInteraction({ guildPerms: [], channelPerms: [] });
+    await handleLeaveCommand(ctx, i as never);
+    await flush();
+    expect(ctx.playersMock.leave).toHaveBeenCalledWith('guild-1');
+    expect(i.replies[0]?.content).toBe('Left <#vc-1>. Stopped **A** and cleared 2 queued items.');
+    expect(ctx.logged[0]).toMatchObject({ type: 'leave', voiceChannelId: 'vc-1', connected: true, cleared: 2 });
+  });
+
+  it('leaves an idle bot', async () => {
+    const ctx = makeCtx({ botChannelId: 'vc-1' });
+    ctx.playersMock.leave.mockReturnValue({ channelId: 'vc-1', stopped: null, cleared: 0 });
+    const i = makeInteraction();
+    await handleLeaveCommand(ctx, i as never);
+    expect(i.replies[0]?.content).toBe('Left <#vc-1>.');
+  });
+
+  it('denies users who are not in the bot channel', async () => {
+    const ctx = makeCtx({ botChannelId: 'vc-bot' });
+    const i = makeInteraction({ voiceChannelId: 'vc-1' });
+    await handleLeaveCommand(ctx, i as never);
+    await flush();
+    expect(i.replies[0]?.content).toContain('<#vc-bot>');
+    expect(ctx.logged[0]).toMatchObject({ type: 'failure', reason: 'not-in-bot-channel', action: '/leave' });
+    expect(ctx.playersMock.leave).not.toHaveBeenCalled();
+  });
+
+  it('denies with not-connected when the bot is not in voice', async () => {
+    const ctx = makeCtx({ botChannelId: null });
+    const i = makeInteraction();
+    await handleLeaveCommand(ctx, i as never);
+    await flush();
+    expect(i.replies[0]?.content).toBe("I'm not in a voice channel.");
+    expect(ctx.logged[0]).toMatchObject({ type: 'failure', reason: 'not-connected', action: '/leave' });
+    expect(ctx.playersMock.leave).not.toHaveBeenCalled();
+  });
+
+  it("cancels a play still loading into the caller's channel before the bot joined", async () => {
+    const ctx = makeCtx({ botChannelId: null });
+    ctx.playersMock.hasPendingPlay.mockImplementation((_g: string, ch: string) => ch === 'vc-1');
+    ctx.playersMock.leave.mockReturnValue(null);
+    const i = makeInteraction({ voiceChannelId: 'vc-1' });
+    await handleLeaveCommand(ctx, i as never);
+    await flush();
+    expect(ctx.playersMock.leave).toHaveBeenCalledWith('guild-1');
+    expect(i.replies[0]?.content).toBe('Cancelled the sound that was still loading.');
+    expect(ctx.logged[0]).toMatchObject({ type: 'leave', voiceChannelId: 'vc-1', connected: false });
+  });
+
+  it('works even when the guild library is not ready', async () => {
+    const ctx = makeCtx({ ready: false, botChannelId: 'vc-1' });
+    ctx.playersMock.leave.mockReturnValue({ channelId: 'vc-1', stopped: null, cleared: 0 });
+    await handleLeaveCommand(ctx, makeInteraction() as never);
+    expect(ctx.playersMock.leave).toHaveBeenCalled();
   });
 });

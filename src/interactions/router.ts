@@ -10,7 +10,7 @@ import type { BotContext } from '../types.js';
 import { handleAutocomplete } from './autocomplete.js';
 import { COMMANDS, PLAY_CONTEXT_MENU_NAME } from './commands.js';
 import { handlePlayContextMenu } from './contextMenu.js';
-import { handleSkipCommand, handleStopCommand, handleVolumeCommand } from './controls.js';
+import { handleLeaveCommand, handleSkipCommand, handleStopCommand, handleVolumeCommand } from './controls.js';
 import { handleInfoCommand } from './info.js';
 import { handlePanelButton, handleSoundboardCommand, isPanelCustomId } from './panel.js';
 import { handlePlayCommand } from './play.js';
@@ -48,6 +48,8 @@ async function dispatch(ctx: BotContext, interaction: Interaction<'cached'>): Pr
         return handleSkipCommand(ctx, interaction);
       case COMMANDS.volume:
         return handleVolumeCommand(ctx, interaction);
+      case COMMANDS.leave:
+        return handleLeaveCommand(ctx, interaction);
       case COMMANDS.sound:
         return handleSoundCommand(ctx, interaction);
       case COMMANDS.stats:
