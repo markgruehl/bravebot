@@ -10,13 +10,23 @@
 import {
   ApplicationCommandType,
   ApplicationIntegrationType,
+  ChannelType,
   ContextMenuCommandBuilder,
   InteractionContextType,
   SlashCommandBuilder,
   type Client,
   type RESTPostAPIApplicationCommandsJSONBody,
+  type SlashCommandIntegerOption,
 } from 'discord.js';
-import { SOUND_NAME_MAX_LENGTH, SOUND_NAME_MIN_LENGTH, VOLUME_MAX, VOLUME_MIN } from '../constants.js';
+import {
+  SOUND_NAME_MAX_LENGTH,
+  SOUND_NAME_MIN_LENGTH,
+  STATS_DAYS_DEFAULT,
+  STATS_DAYS_MAX,
+  STATS_DAYS_MIN,
+  VOLUME_MAX,
+  VOLUME_MIN,
+} from '../constants.js';
 
 export const COMMANDS = {
   play: 'play',
@@ -25,9 +35,13 @@ export const COMMANDS = {
   skip: 'skip',
   volume: 'volume',
   sound: 'sound',
+  stats: 'stats',
+  info: 'info',
 } as const;
 
 export const SOUND_SUBCOMMANDS = { add: 'add', rename: 'rename', delete: 'delete' } as const;
+
+export const STATS_SUBCOMMANDS = { server: 'server', user: 'user', channel: 'channel' } as const;
 
 /** Message context-menu command name (exact). */
 export const PLAY_CONTEXT_MENU_NAME = 'Play in my voice channel';
@@ -42,12 +56,27 @@ export const OPTIONS = {
   name: 'name',
   /** /volume: the new level (integer 0-200). */
   level: 'level',
+  /** /stats: window length in days (integer 1-365, default 30). */
+  days: 'days',
+  /** /stats user: whose card (default: the caller). */
+  user: 'user',
+  /** /stats channel: the voice channel. */
+  channel: 'channel',
 } as const;
 
 /** Applies guild-only availability (no DMs, no user installs). */
 function guildOnly<T extends SlashCommandBuilder | ContextMenuCommandBuilder>(builder: T): T {
   builder.setContexts(InteractionContextType.Guild).setIntegrationTypes(ApplicationIntegrationType.GuildInstall);
   return builder;
+}
+
+/** The optional /stats `days` option, shared by every subcommand. */
+function daysOption(o: SlashCommandIntegerOption): SlashCommandIntegerOption {
+  return o
+    .setName(OPTIONS.days)
+    .setDescription(`How many days back to look (${STATS_DAYS_MIN}-${STATS_DAYS_MAX}, default ${STATS_DAYS_DEFAULT})`)
+    .setMinValue(STATS_DAYS_MIN)
+    .setMaxValue(STATS_DAYS_MAX);
 }
 
 export function buildCommandDefinitions(): RESTPostAPIApplicationCommandsJSONBody[] {
@@ -144,6 +173,37 @@ export function buildCommandDefinitions(): RESTPostAPIApplicationCommandsJSONBod
         ),
     );
 
+  const stats = guildOnly(new SlashCommandBuilder())
+    .setName(COMMANDS.stats)
+    .setDescription('Voice channel stats from the join/leave notices')
+    .addSubcommand((sc) =>
+      sc.setName(STATS_SUBCOMMANDS.server).setDescription('Stats for the whole server').addIntegerOption(daysOption),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName(STATS_SUBCOMMANDS.user)
+        .setDescription("Someone's voice stats card")
+        .addUserOption((o) => o.setName(OPTIONS.user).setDescription('Whose stats (default: you)'))
+        .addIntegerOption(daysOption),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName(STATS_SUBCOMMANDS.channel)
+        .setDescription('Stats for one voice channel')
+        .addChannelOption((o) =>
+          o
+            .setName(OPTIONS.channel)
+            .setDescription('The voice channel')
+            .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+            .setRequired(true),
+        )
+        .addIntegerOption(daysOption),
+    );
+
+  const info = guildOnly(new SlashCommandBuilder())
+    .setName(COMMANDS.info)
+    .setDescription('About this bot: version, uptime and features');
+
   const contextMenu = guildOnly(new ContextMenuCommandBuilder())
     .setName(PLAY_CONTEXT_MENU_NAME)
     .setType(ApplicationCommandType.Message);
@@ -155,6 +215,8 @@ export function buildCommandDefinitions(): RESTPostAPIApplicationCommandsJSONBod
     skip.toJSON(),
     volume.toJSON(),
     sound.toJSON(),
+    stats.toJSON(),
+    info.toJSON(),
     contextMenu.toJSON(),
   ];
 }

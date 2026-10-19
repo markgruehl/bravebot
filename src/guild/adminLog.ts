@@ -40,6 +40,7 @@ const FAILURE_LABELS: Record<FailureReason, string> = {
   'name-taken': 'sound name already taken',
   'library-error': 'library error',
   'not-ready': 'bot not ready in this server',
+  'stats-unavailable': 'voice stats unavailable',
   'internal-error': 'internal error',
 };
 

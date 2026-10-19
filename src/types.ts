@@ -11,6 +11,7 @@
 
 import type { Client, TextChannel, VoiceState } from 'discord.js';
 import type { Config } from './config.js';
+import type { StatsService } from './stats/types.js';
 import type { PlaybackErrorCode } from './errors.js';
 
 // ---------------------------------------------------------------------------
@@ -402,6 +403,7 @@ export type FailureReason =
   | 'name-taken'
   | 'library-error'
   | 'not-ready'
+  | 'stats-unavailable' // /stats could not read the system channel history
   | 'internal-error';
 
 interface LogEventBase {
@@ -491,6 +493,8 @@ export interface BotContext {
   readonly players: PlayerManager;
   readonly guilds: GuildRegistry;
   readonly adminLog: AdminLog;
+  /** Voice stats: in-memory event cache built from system-channel notices (src/stats/cache.ts). */
+  readonly stats: StatsService;
   /**
    * Fire-and-forget: re-run guild setup (channels + library index) when the guild has no
    * GuildState, no setup is pending and the per-guild retry cooldown has elapsed. Never
