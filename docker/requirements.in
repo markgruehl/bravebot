@@ -6,4 +6,4 @@
 # release PR as a patch bump; the image is rebuilt when that release is cut.
 # The "default" extra pulls yt-dlp-ejs (YouTube JS challenge solver) plus the recommended
 # optional dependencies (brotli, certifi, mutagen, pycryptodomex, websockets...).
-yt-dlp[default]==2026.8.19
+yt-dlp[default]==2026.10.21
